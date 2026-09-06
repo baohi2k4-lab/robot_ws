@@ -47,8 +47,8 @@ def generate_launch_description():
         output='screen',
         parameters=[dual_ekf_config],
         remappings=[
-            ('odometry/filtered', '/odometry/local'),
-            ('accel/filtered', '/accel/local'),
+            ('odometry/filtered', '/odometry/filtered'),
+            ('accel/filtered', '/accel/filtered'),
         ]
     )
 
@@ -77,7 +77,7 @@ def generate_launch_description():
         remappings=[
             ('imu', '/imu/data'),
             ('gps/fix', '/gps/fix'),
-            ('odometry/filtered', '/odometry/local'),
+            ('odometry/filtered', '/odometry/filtered'),
             ('odometry/gps', '/odometry/gps'),
         ],
         condition=IfCondition(LaunchConfiguration('enable_gps'))
