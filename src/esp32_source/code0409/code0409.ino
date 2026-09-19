@@ -109,10 +109,10 @@ struct WheelPID {
   bool  enabled;
 };
 
-// Hệ số PID tối ưu êm ái cho 4 động cơ 775, không giật cục
-#define PID_KP              0.750f  // Kp vừa phải để bám mượt, không dao động giật cục
-#define PID_KI              0.500f  // Ki tích phân bù êm sai số ma sát hộp số
-#define PID_KD              0.030f  // Kd nhỏ để hãm nhẹ
+// Hệ số PID tối ưu bám tốc và vượt gờ đất gồ ghề cho 4 động cơ 775
+#define PID_KP              0.950f  // Kp tăng lực đẩy nhanh khi gặp mô đất
+#define PID_KI              0.800f  // Ki tích phân bù lực tức thì vượt ma sát đất gồ ghề
+#define PID_KD              0.035f  // Kd nhỏ để hãm nhẹ
 #define K_SYNC_CROSS_WHEEL  0.0f    // Khử hoàn toàn giằng co chéo bánh
 #define K_LR_BALANCE        0.0f    // Để ROS tự chủ động điều phối góc quay Wz
 
@@ -432,9 +432,11 @@ void updatePID(float dt) {
       continue;
     }
 
-    // 1. Feedforward có bù ma sát tĩnh (Deadband Friction Offset)
-    // Cung cấp mức sàn 30 PWM + thành phần tuyến tính theo tốc độ cho tải nặng
-    float ff_pwm = 30.0f + (target / 220.0f) * (255.0f - 30.0f);
+    // 1. Feedforward có bù ma sát tĩnh (Deadband Friction Offset) cho đất gồ ghề
+    // Cung cấp mức sàn 55 PWM (hoặc 70 PWM khi xoay tại chỗ) + thành phần tuyến tính cho tải nặng
+    bool isPivotTurn = (rosTargetRpmSigned[0] * rosTargetRpmSigned[2] < -0.01f);
+    float base_floor = isPivotTurn ? 70.0f : 55.0f;
+    float ff_pwm = base_floor + (target / 220.0f) * (255.0f - base_floor);
 
     // 2. Sai số bám tốc độ mục tiêu độc lập cho từng bánh
     float track_error = target - rpm_act;
@@ -444,7 +446,7 @@ void updatePID(float dt) {
 
     // 3. Khâu tích phân (Integral) có Anti-Windup (bơm thêm lực khi tải nặng bị ỳ)
     // Tăng giới hạn tích phân để PID tự vượt ma sát tĩnh một cách tự nhiên
-    wpid[i].integral = constrain(wpid[i].integral + track_error * dt, -100.0f, 100.0f);
+    wpid[i].integral = constrain(wpid[i].integral + track_error * dt, -140.0f, 140.0f);
 
     // 4. Khâu vi phân (Derivative) có lọc nhiễu tần số cao
     float rawDeriv = (track_error - wpid[i].lastError) / dt;
@@ -458,9 +460,10 @@ void updatePID(float dt) {
     // Loại bỏ hoàn toàn các khâu giằng co và ghì phanh phi tuyến gây giật cục
     int desired = constrain((int)(ff_pwm + pid_corr), 0, 255);
 
-    // Sàn PWM tối thiểu để động cơ 775 duy trì lăn bánh nhẹ nhàng
-    if (target > 1.0f && desired < 25) {
-      desired = 25;
+    // Sàn PWM tối thiểu để động cơ 775 duy trì lăn bánh khỏe khoắn trên đất gồ ghề
+    int min_floor = isPivotTurn ? 60 : 45;
+    if (target > 1.0f && desired < min_floor) {
+      desired = min_floor;
     }
 
     // Giới hạn biến thiên PWM bất đối xứng (chống giật sốc cơ khí)

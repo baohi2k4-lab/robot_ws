@@ -17,9 +17,10 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan, NavSatFix, NavSatStatus, Imu
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, Point, PoseStamped
 from nav_msgs.msg import Odometry, Path as RosPath
-from std_msgs.msg import Float32MultiArray
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import Float32MultiArray, Empty
 import numpy as np
 
 try:
@@ -61,8 +62,8 @@ class CnnDriverNode(Node):
         self.declare_parameter('eta_smc', 0.6)
         self.declare_parameter('phi_smc', 0.5)
         self.declare_parameter('max_steering_angle_deg', 14.0)
-        self.declare_parameter('turn_in_place_threshold_deg', 0.30)
-        self.declare_parameter('turn_in_place_resume_deg', 0.30)
+        self.declare_parameter('turn_in_place_threshold_deg', 1.20)
+        self.declare_parameter('turn_in_place_resume_deg', 0.60)
         self.declare_parameter('row_spacing', 0.90)
         self.declare_parameter('ema_alpha', 0.45)
         self.declare_parameter('enable_uturn', False)
@@ -108,8 +109,9 @@ class CnnDriverNode(Node):
         self.declare_parameter('turn_side', 'RIGHT')
         self.declare_parameter('omega_open_angle_deg', 35.0)
         self.declare_parameter('omega_r1', 0.85)
-        self.declare_parameter('omega_clearance', 0.25)
-        self.declare_parameter('omega_lead_in', 0.40)
+        self.declare_parameter('omega_clearance', 0.55)
+        self.declare_parameter('omega_lead_in', 0.50)
+        self.declare_parameter('wait_for_rviz_start', True)
 
         p = self.get_parameter
         self.model_path               = p('model_path').value
@@ -173,6 +175,8 @@ class CnnDriverNode(Node):
         self.omega_r1                 = p('omega_r1').value
         self.omega_clearance          = p('omega_clearance').value
         self.omega_lead_in            = p('omega_lead_in').value
+        self.wait_for_rviz_start      = p('wait_for_rviz_start').value
+        self.is_mission_started       = not self.wait_for_rviz_start
         self.current_lane_idx         = 1
 
         if self.enable_file_logging:
@@ -274,8 +278,10 @@ class CnnDriverNode(Node):
         )
 
         self.pure_pursuit_controller = PurePursuitController()
+        # Đảm bảo tốc độ tiến bám cung quay đầu Omega (>= 0.075 m/s) không bị gán 0.0
+        path_follow_speed = max(float(self.linear_speed), 0.075)
         self.pure_pursuit_controller.initialize(
-            turn_linear_speed=self.turn_linear_speed,
+            turn_linear_speed=path_follow_speed,
             turn_angular_speed=self.turn_angular_speed
         )
 
@@ -349,10 +355,11 @@ class CnnDriverNode(Node):
         self.output_dir = os.path.join(os.path.expanduser('~'), 'ros2_debug_imgs')
 
         # ── Publishers & Subscribers ──────────────────────────────────
-        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        self.gps_pub     = self.create_publisher(NavSatFix, '/localization/gps', 10)
-        self.plan_pub    = self.create_publisher(RosPath, '/plan', 10)
-        self.plan_timer  = self.create_timer(1.0, self.publish_mission_path)
+        self.cmd_vel_pub   = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.gps_pub       = self.create_publisher(NavSatFix, '/localization/gps', 10)
+        self.plan_pub      = self.create_publisher(RosPath, '/plan', 10)
+        self.marker_pub    = self.create_publisher(MarkerArray, '/mission_markers', 10)
+        self.plan_timer    = self.create_timer(0.5, self._plan_and_markers_timer_callback)
         self.heading_adjust_timer = self.create_timer(0.05, self._heading_adjust_timer_callback)
 
         self.image_sub = self.create_subscription(
@@ -390,6 +397,15 @@ class CnnDriverNode(Node):
             Float32MultiArray, '/crop_row/detection', self.remote_cnn_callback, 10
         )
 
+        # Cho phép người dùng tự chấm điểm Goal trực tiếp trên RViz bằng công cụ 2D Goal Pose
+        self.goal_sub = self.create_subscription(
+            PoseStamped, '/goal_pose', self.goal_pose_callback, 10
+        )
+        # Cho phép kích hoạt xuất phát từ topic /start_mission
+        self.start_mission_sub = self.create_subscription(
+            Empty, '/start_mission', self.start_mission_callback, 10
+        )
+
         self.get_logger().info(
             f"🚀 [AI CNN Driver] Sẵn sàng tự hành bám luống (Vận tốc: {self.linear_speed:.2f} m/s | Model INT8)"
         )
@@ -404,6 +420,55 @@ class CnnDriverNode(Node):
         self._latest_gps_info = {}
         self._latest_inf_ms = 0.0
         self.status_timer = self.create_timer(1.0, self.status_timer_callback)
+
+    def start_mission_callback(self, msg: Empty):
+        """Nhận tín hiệu kích hoạt xuất phát từ topic /start_mission."""
+        if not self.is_mission_started:
+            self.is_mission_started = True
+            now = self.get_clock().now()
+            self.node_start_time = now
+            self.state_start_time = now
+            self.get_logger().info("🚀 [XUẤT PHÁT] Đã nhận lệnh xuất phát từ /start_mission! Xe bắt đầu lăn bánh...")
+
+    def goal_pose_callback(self, msg: PoseStamped):
+        """Nhận điểm Goal do người dùng tự chấm bằng chuột trên RViz (nút 2D Goal Pose)."""
+        gx = float(msg.pose.position.x)
+        gy = float(msg.pose.position.y)
+
+        # Nếu xe đang ở trạng thái chờ (READY), cú click 2D Goal Pose trên RViz sẽ lập tức kích hoạt xe xuất phát!
+        if not self.is_mission_started:
+            self.is_mission_started = True
+            now = self.get_clock().now()
+            self.node_start_time = now
+            self.state_start_time = now
+            cam_lost = (self._last_image_time == 0.0) or ((time.time() - self._last_image_time) > 2.5)
+            if cam_lost:
+                self.get_logger().warn(
+                    f"⚠️ [XUẤT PHÁT TỪ RVIZ] Đã nhận lệnh từ 2D Goal Pose ({gx:.2f}m, {gy:.2f}m), "
+                    f"NHƯNG CAMERA ĐANG MẤT TÍN HIỆU! Xe tạm dừng chờ Camera kết nối lại để bám luống..."
+                )
+            else:
+                self.get_logger().info(
+                    f"🚀 [XUẤT PHÁT TỪ RVIZ] Đã nhận lệnh điều khiển từ 2D Goal Pose ({gx:.2f}m, {gy:.2f}m)! Xe bắt đầu lăn bánh..."
+                )
+
+        if self.current_lane_idx == 1:
+            if gx > 1.0:
+                self.goal_1_x = gx
+                self.goal_1_y = gy
+                self.field_length = max(1.0, gx)
+                self.goal_2_x = gx
+                self.goal_2_y = gy - abs(self.row_spacing)
+                self.get_logger().info(
+                    f"🎯 [RVIZ 2D GOAL] Đã cập nhật GOAL 1 theo điểm bạn vừa chấm: ({gx:.2f}m, {gy:.2f}m). "
+                    f"Chiều dài luống mới: {self.field_length:.2f}m."
+                )
+        elif self.current_lane_idx == 2:
+            self.goal_3_x = gx
+            self.goal_3_y = gy
+            self.get_logger().info(
+                f"🎯 [RVIZ 2D GOAL] Đã cập nhật GOAL 3 (Đích đến) theo điểm bạn vừa chấm: ({gx:.2f}m, {gy:.2f}m)!"
+            )
 
     # ── Compatibility Properties ─────────────────────────────────────
     @property
@@ -461,6 +526,11 @@ class CnnDriverNode(Node):
         finished = (res["status"] == "COMPLETED")
         return res["linear_velocity"], res["angular_velocity"], finished, self.pure_pursuit_controller.path_index
 
+    def _plan_and_markers_timer_callback(self):
+        """Timer chu kỳ 2Hz xuất bản lộ trình toàn cục và các cọc tiêu Marker chấm điểm."""
+        self.publish_mission_path()
+        self.publish_mission_markers()
+
     def publish_mission_path(self):
         """Xuất bản toàn bộ lộ trình nhiệm vụ 2 luống + Omega Turn lên /plan cho RViz hiển thị trực quan."""
         try:
@@ -478,6 +548,530 @@ class CnnDriverNode(Node):
             self.plan_pub.publish(ros_path)
         except Exception as e:
             self.get_logger().warn(f"Failed to publish mission path: {e}", throttle_duration_sec=5.0)
+
+    def publish_mission_markers(self):
+        """
+        Xuất bản trực quan hóa các điểm Goal, luống cây quét thực tế và bảng chấm điểm
+        tiến độ nhiệm vụ lên RViz qua topic /mission_markers.
+        """
+        try:
+            marker_arr = MarkerArray()
+            now_msg = self.get_clock().now().to_msg()
+            frame_id = 'odom'
+
+            # ── 1. Cọc tiêu START (0, 0) ──────────────────────────────
+            start_cyl = Marker()
+            start_cyl.header.frame_id = frame_id
+            start_cyl.header.stamp = now_msg
+            start_cyl.ns = "mission_goals"
+            start_cyl.id = 10
+            start_cyl.type = Marker.CYLINDER
+            start_cyl.action = Marker.ADD
+            start_cyl.pose.position.x = 0.0
+            start_cyl.pose.position.y = 0.0
+            start_cyl.pose.position.z = 0.20
+            start_cyl.pose.orientation.w = 1.0
+            start_cyl.scale.x = 0.25
+            start_cyl.scale.y = 0.25
+            start_cyl.scale.z = 0.40
+            start_cyl.color.r = 0.0
+            start_cyl.color.g = 0.8
+            start_cyl.color.b = 1.0
+            start_cyl.color.a = 0.85
+            marker_arr.markers.append(start_cyl)
+
+            start_txt = Marker()
+            start_txt.header.frame_id = frame_id
+            start_txt.header.stamp = now_msg
+            start_txt.ns = "mission_goals"
+            start_txt.id = 11
+            start_txt.type = Marker.TEXT_VIEW_FACING
+            start_txt.action = Marker.ADD
+            start_txt.pose.position.x = 0.0
+            start_txt.pose.position.y = 0.0
+            start_txt.pose.position.z = 0.55
+            start_txt.pose.orientation.w = 1.0
+            start_txt.scale.z = 0.22
+            start_txt.color.r = 0.0
+            start_txt.color.g = 0.9
+            start_txt.color.b = 1.0
+            start_txt.color.a = 1.0
+            start_txt.text = "START (0, 0)\nDau Luong 1"
+            marker_arr.markers.append(start_txt)
+
+            # ── 2. Cọc tiêu GOAL 1 (Cuối Luống 1) ─────────────────────
+            g1_cyl = Marker()
+            g1_cyl.header.frame_id = frame_id
+            g1_cyl.header.stamp = now_msg
+            g1_cyl.ns = "mission_goals"
+            g1_cyl.id = 20
+            g1_cyl.type = Marker.CYLINDER
+            g1_cyl.action = Marker.ADD
+            g1_cyl.pose.position.x = float(self.goal_1_x)
+            g1_cyl.pose.position.y = float(self.goal_1_y)
+            g1_cyl.pose.position.z = 0.25
+            g1_cyl.pose.orientation.w = 1.0
+            g1_cyl.scale.x = 0.30
+            g1_cyl.scale.y = 0.30
+            g1_cyl.scale.z = 0.50
+            g1_cyl.color.r = 1.0
+            g1_cyl.color.g = 0.85
+            g1_cyl.color.b = 0.0
+            g1_cyl.color.a = 0.90
+            marker_arr.markers.append(g1_cyl)
+
+            g1_txt = Marker()
+            g1_txt.header.frame_id = frame_id
+            g1_txt.header.stamp = now_msg
+            g1_txt.ns = "mission_goals"
+            g1_txt.id = 21
+            g1_txt.type = Marker.TEXT_VIEW_FACING
+            g1_txt.action = Marker.ADD
+            g1_txt.pose.position.x = float(self.goal_1_x)
+            g1_txt.pose.position.y = float(self.goal_1_y)
+            g1_txt.pose.position.z = 0.70
+            g1_txt.pose.orientation.w = 1.0
+            g1_txt.scale.z = 0.24
+            g1_txt.color.r = 1.0
+            g1_txt.color.g = 0.9
+            g1_txt.color.b = 0.0
+            g1_txt.color.a = 1.0
+            g1_txt.text = f"GOAL 1 ({self.goal_1_x:.1f}, {self.goal_1_y:.1f})\nCuoi Luong 1"
+            marker_arr.markers.append(g1_txt)
+
+            # ── 3. Cọc tiêu GOAL 2 (Đầu Luống 2) ─────────────────────
+            g2_cyl = Marker()
+            g2_cyl.header.frame_id = frame_id
+            g2_cyl.header.stamp = now_msg
+            g2_cyl.ns = "mission_goals"
+            g2_cyl.id = 30
+            g2_cyl.type = Marker.CYLINDER
+            g2_cyl.action = Marker.ADD
+            g2_cyl.pose.position.x = float(self.goal_2_x)
+            g2_cyl.pose.position.y = float(self.goal_2_y)
+            g2_cyl.pose.position.z = 0.25
+            g2_cyl.pose.orientation.w = 1.0
+            g2_cyl.scale.x = 0.30
+            g2_cyl.scale.y = 0.30
+            g2_cyl.scale.z = 0.50
+            g2_cyl.color.r = 1.0
+            g2_cyl.color.g = 0.2
+            g2_cyl.color.b = 1.0
+            g2_cyl.color.a = 0.90
+            marker_arr.markers.append(g2_cyl)
+
+            g2_txt = Marker()
+            g2_txt.header.frame_id = frame_id
+            g2_txt.header.stamp = now_msg
+            g2_txt.ns = "mission_goals"
+            g2_txt.id = 31
+            g2_txt.type = Marker.TEXT_VIEW_FACING
+            g2_txt.action = Marker.ADD
+            g2_txt.pose.position.x = float(self.goal_2_x)
+            g2_txt.pose.position.y = float(self.goal_2_y)
+            g2_txt.pose.position.z = 0.70
+            g2_txt.pose.orientation.w = 1.0
+            g2_txt.scale.z = 0.24
+            g2_txt.color.r = 1.0
+            g2_txt.color.g = 0.3
+            g2_txt.color.b = 1.0
+            g2_txt.color.a = 1.0
+            g2_txt.text = f"GOAL 2 ({self.goal_2_x:.1f}, {self.goal_2_y:.1f})\nDau Luong 2"
+            marker_arr.markers.append(g2_txt)
+
+            # ── 4. Cọc tiêu GOAL 3 (Đích đến kết thúc nhiệm vụ) ────────
+            g3_cyl = Marker()
+            g3_cyl.header.frame_id = frame_id
+            g3_cyl.header.stamp = now_msg
+            g3_cyl.ns = "mission_goals"
+            g3_cyl.id = 40
+            g3_cyl.type = Marker.CYLINDER
+            g3_cyl.action = Marker.ADD
+            g3_cyl.pose.position.x = float(self.goal_3_x)
+            g3_cyl.pose.position.y = float(self.goal_3_y)
+            g3_cyl.pose.position.z = 0.30
+            g3_cyl.pose.orientation.w = 1.0
+            g3_cyl.scale.x = 0.35
+            g3_cyl.scale.y = 0.35
+            g3_cyl.scale.z = 0.60
+            g3_cyl.color.r = 0.1
+            g3_cyl.color.g = 1.0
+            g3_cyl.color.b = 0.2
+            g3_cyl.color.a = 0.95
+            marker_arr.markers.append(g3_cyl)
+
+            g3_txt = Marker()
+            g3_txt.header.frame_id = frame_id
+            g3_txt.header.stamp = now_msg
+            g3_txt.ns = "mission_goals"
+            g3_txt.id = 41
+            g3_txt.type = Marker.TEXT_VIEW_FACING
+            g3_txt.action = Marker.ADD
+            g3_txt.pose.position.x = float(self.goal_3_x)
+            g3_txt.pose.position.y = float(self.goal_3_y)
+            g3_txt.pose.position.z = 0.80
+            g3_txt.pose.orientation.w = 1.0
+            g3_txt.scale.z = 0.26
+            g3_txt.color.r = 0.1
+            g3_txt.color.g = 1.0
+            g3_txt.color.b = 0.3
+            g3_txt.color.a = 1.0
+            g3_txt.text = f"GOAL 3 ({self.goal_3_x:.1f}, {self.goal_3_y:.1f})\nDICH DEN (FINISH)"
+            marker_arr.markers.append(g3_txt)
+
+            # ── 5. Bố trí thực tế: 12 thùng carton (3 hàng x 4 thùng/hàng, 22x20cm cao 65cm) ──
+            spacing = abs(self.row_spacing)
+            row_y_list = [0.5 * spacing, -0.5 * spacing, -1.5 * spacing]
+            L = float(self.field_length)
+
+            boxes_marker = Marker()
+            boxes_marker.header.frame_id = frame_id
+            boxes_marker.header.stamp = now_msg
+            boxes_marker.ns = "carton_boxes"
+            boxes_marker.id = 50
+            boxes_marker.type = Marker.CUBE_LIST
+            boxes_marker.action = Marker.ADD
+            boxes_marker.pose.orientation.w = 1.0
+            # Kích thước thùng thật: dài 22cm, rộng 20cm, cao 65cm
+            boxes_marker.scale.x = 0.22
+            boxes_marker.scale.y = 0.20
+            boxes_marker.scale.z = 0.65
+            # Màu nâu carton thực tế
+            boxes_marker.color.r = 0.82
+            boxes_marker.color.g = 0.58
+            boxes_marker.color.b = 0.32
+            boxes_marker.color.a = 0.95
+
+            # Mỗi hàng có đúng 4 thùng phân bố trên chiều dài L (x = 0, 1m, 2m, 3m)
+            box_x_positions = [0.0, L / 3.0, 2.0 * L / 3.0, L]
+
+            for ry in row_y_list:
+                for x_val in box_x_positions:
+                    p = Point()
+                    p.x = float(x_val)
+                    p.y = float(ry)
+                    p.z = 0.325  # Đặt đáy thùng tiếp đất (cao 0.65m / 2)
+                    boxes_marker.points.append(p)
+            marker_arr.markers.append(boxes_marker)
+
+            # Đường tim luống 1 và luống 2 (LINE_LIST)
+            lanes_marker = Marker()
+            lanes_marker.header.frame_id = frame_id
+            lanes_marker.header.stamp = now_msg
+            lanes_marker.ns = "crop_rows"
+            lanes_marker.id = 51
+            lanes_marker.type = Marker.LINE_LIST
+            lanes_marker.action = Marker.ADD
+            lanes_marker.pose.orientation.w = 1.0
+            lanes_marker.scale.x = 0.04
+            lanes_marker.color.r = 0.4
+            lanes_marker.color.g = 0.7
+            lanes_marker.color.b = 1.0
+            lanes_marker.color.a = 0.75
+
+            # Tim luống 1 (y = 0.0)
+            p1_start = Point(x=0.0, y=0.0, z=0.02)
+            p1_end = Point(x=L, y=0.0, z=0.02)
+            lanes_marker.points.extend([p1_start, p1_end])
+
+            # Tim luống 2 (y = -spacing)
+            p2_start = Point(x=L, y=-spacing, z=0.02)
+            p2_end = Point(x=0.0, y=-spacing, z=0.02)
+            lanes_marker.points.extend([p2_start, p2_end])
+            marker_arr.markers.append(lanes_marker)
+
+            # ── 6. Đường cong quay đầu Omega & Các điểm mốc Waypoints ──
+            omega_path = OmegaTurnPlanner.generate_path(
+                start_x=float(self.goal_1_x),
+                start_y=float(self.goal_1_y),
+                start_yaw=0.0,
+                row_spacing=self.row_spacing,
+                turn_side=self.turn_side,
+                open_angle_deg=self.omega_open_angle_deg,
+                r1=self.omega_r1,
+                clearance_dist=self.omega_clearance,
+                lead_in_dist=self.omega_lead_in,
+            )
+            if omega_path and omega_path.waypoints:
+                # 6.1. Dải đường cong liên tục (LINE_STRIP màu cam)
+                omega_marker = Marker()
+                omega_marker.header.frame_id = frame_id
+                omega_marker.header.stamp = now_msg
+                omega_marker.ns = "omega_turn"
+                omega_marker.id = 60
+                omega_marker.type = Marker.LINE_STRIP
+                omega_marker.action = Marker.ADD
+                omega_marker.pose.orientation.w = 1.0
+                omega_marker.scale.x = 0.05
+                omega_marker.color.r = 1.0
+                omega_marker.color.g = 0.55
+                omega_marker.color.b = 0.0
+                omega_marker.color.a = 0.95
+                for wp in omega_path.waypoints:
+                    p = Point(x=float(wp[0]), y=float(wp[1]), z=0.03)
+                    omega_marker.points.append(p)
+                marker_arr.markers.append(omega_marker)
+
+                # 6.2. Chuỗi các điểm mốc nhỏ liên tiếp (SPHERE_LIST cách nhau ~15cm)
+                wp_spheres = Marker()
+                wp_spheres.header.frame_id = frame_id
+                wp_spheres.header.stamp = now_msg
+                wp_spheres.ns = "omega_turn"
+                wp_spheres.id = 61
+                wp_spheres.type = Marker.SPHERE_LIST
+                wp_spheres.action = Marker.ADD
+                wp_spheres.pose.orientation.w = 1.0
+                wp_spheres.scale.x = 0.10
+                wp_spheres.scale.y = 0.10
+                wp_spheres.scale.z = 0.10
+                wp_spheres.color.r = 1.0
+                wp_spheres.color.g = 0.80
+                wp_spheres.color.b = 0.10
+                wp_spheres.color.a = 0.90
+
+                for wp in omega_path.waypoints[::3]:
+                    p = Point(x=float(wp[0]), y=float(wp[1]), z=0.04)
+                    wp_spheres.points.append(p)
+                marker_arr.markers.append(wp_spheres)
+
+                # 6.3. Ba điểm mốc then chốt (Milestones) trên cung quay đầu:
+                pts = omega_path.waypoints
+                # Mốc 1: Thoát luống (Lead-out)
+                lead_out_idx = min(len(pts) - 1, max(1, int(self.omega_clearance / 0.05)))
+                p_lead_out = pts[lead_out_idx]
+
+                m1_cyl = Marker()
+                m1_cyl.header.frame_id = frame_id
+                m1_cyl.header.stamp = now_msg
+                m1_cyl.ns = "omega_turn"
+                m1_cyl.id = 62
+                m1_cyl.type = Marker.CYLINDER
+                m1_cyl.action = Marker.ADD
+                m1_cyl.pose.position.x = float(p_lead_out[0])
+                m1_cyl.pose.position.y = float(p_lead_out[1])
+                m1_cyl.pose.position.z = 0.15
+                m1_cyl.pose.orientation.w = 1.0
+                m1_cyl.scale.x = 0.18
+                m1_cyl.scale.y = 0.18
+                m1_cyl.scale.z = 0.30
+                m1_cyl.color.r = 1.0
+                m1_cyl.color.g = 0.9
+                m1_cyl.color.b = 0.0
+                m1_cyl.color.a = 0.90
+                marker_arr.markers.append(m1_cyl)
+
+                m1_txt = Marker()
+                m1_txt.header.frame_id = frame_id
+                m1_txt.header.stamp = now_msg
+                m1_txt.ns = "omega_turn"
+                m1_txt.id = 63
+                m1_txt.type = Marker.TEXT_VIEW_FACING
+                m1_txt.action = Marker.ADD
+                m1_txt.pose.position.x = float(p_lead_out[0])
+                m1_txt.pose.position.y = float(p_lead_out[1])
+                m1_txt.pose.position.z = 0.40
+                m1_txt.pose.orientation.w = 1.0
+                m1_txt.scale.z = 0.18
+                m1_txt.color.r = 1.0
+                m1_txt.color.g = 1.0
+                m1_txt.color.b = 0.2
+                m1_txt.color.a = 1.0
+                m1_txt.text = "1. Thoat Luong"
+                marker_arr.markers.append(m1_txt)
+
+                # Mốc 2: Đỉnh cua xa nhất (Apex)
+                apex_pt = max(pts, key=lambda pt: pt[0])
+                m2_cyl = Marker()
+                m2_cyl.header.frame_id = frame_id
+                m2_cyl.header.stamp = now_msg
+                m2_cyl.ns = "omega_turn"
+                m2_cyl.id = 64
+                m2_cyl.type = Marker.CYLINDER
+                m2_cyl.action = Marker.ADD
+                m2_cyl.pose.position.x = float(apex_pt[0])
+                m2_cyl.pose.position.y = float(apex_pt[1])
+                m2_cyl.pose.position.z = 0.18
+                m2_cyl.pose.orientation.w = 1.0
+                m2_cyl.scale.x = 0.22
+                m2_cyl.scale.y = 0.22
+                m2_cyl.scale.z = 0.36
+                m2_cyl.color.r = 1.0
+                m2_cyl.color.g = 0.4
+                m2_cyl.color.b = 0.0
+                m2_cyl.color.a = 0.95
+                marker_arr.markers.append(m2_cyl)
+
+                m2_txt = Marker()
+                m2_txt.header.frame_id = frame_id
+                m2_txt.header.stamp = now_msg
+                m2_txt.ns = "omega_turn"
+                m2_txt.id = 65
+                m2_txt.type = Marker.TEXT_VIEW_FACING
+                m2_txt.action = Marker.ADD
+                m2_txt.pose.position.x = float(apex_pt[0])
+                m2_txt.pose.position.y = float(apex_pt[1])
+                m2_txt.pose.position.z = 0.50
+                m2_txt.pose.orientation.w = 1.0
+                m2_txt.scale.z = 0.20
+                m2_txt.color.r = 1.0
+                m2_txt.color.g = 0.5
+                m2_txt.color.b = 0.0
+                m2_txt.color.a = 1.0
+                m2_txt.text = "2. Dinh Cua (Apex)"
+                marker_arr.markers.append(m2_txt)
+
+                # Mốc 3: Nắn thẳng vào Luống 2 (Lead-in)
+                lead_in_idx = max(0, len(pts) - 1 - max(1, int(self.omega_lead_in / 0.05)))
+                p_lead_in = pts[lead_in_idx]
+
+                m3_cyl = Marker()
+                m3_cyl.header.frame_id = frame_id
+                m3_cyl.header.stamp = now_msg
+                m3_cyl.ns = "omega_turn"
+                m3_cyl.id = 66
+                m3_cyl.type = Marker.CYLINDER
+                m3_cyl.action = Marker.ADD
+                m3_cyl.pose.position.x = float(p_lead_in[0])
+                m3_cyl.pose.position.y = float(p_lead_in[1])
+                m3_cyl.pose.position.z = 0.15
+                m3_cyl.pose.orientation.w = 1.0
+                m3_cyl.scale.x = 0.18
+                m3_cyl.scale.y = 0.18
+                m3_cyl.scale.z = 0.30
+                m3_cyl.color.r = 0.8
+                m3_cyl.color.g = 0.2
+                m3_cyl.color.b = 1.0
+                m3_cyl.color.a = 0.90
+                marker_arr.markers.append(m3_cyl)
+
+                m3_txt = Marker()
+                m3_txt.header.frame_id = frame_id
+                m3_txt.header.stamp = now_msg
+                m3_txt.ns = "omega_turn"
+                m3_txt.id = 67
+                m3_txt.type = Marker.TEXT_VIEW_FACING
+                m3_txt.action = Marker.ADD
+                m3_txt.pose.position.x = float(p_lead_in[0])
+                m3_txt.pose.position.y = float(p_lead_in[1])
+                m3_txt.pose.position.z = 0.40
+                m3_txt.pose.orientation.w = 1.0
+                m3_txt.scale.z = 0.18
+                m3_txt.color.r = 0.9
+                m3_txt.color.g = 0.3
+                m3_txt.color.b = 1.0
+                m3_txt.color.a = 1.0
+                m3_txt.text = "3. Vao Luong 2"
+                marker_arr.markers.append(m3_txt)
+
+                # 6.4. Điểm mục tiêu nhìn trước thời gian thực (Lookahead Carrot Point)
+                if getattr(self.pure_pursuit_controller, 'enabled', False) and getattr(self.pure_pursuit_controller, 'path', None):
+                    c_path = self.pure_pursuit_controller.path
+                    c_idx = min(len(c_path) - 1, self.pure_pursuit_controller.path_index + 4)
+                    c_pt = c_path[c_idx]
+
+                    carrot_marker = Marker()
+                    carrot_marker.header.frame_id = frame_id
+                    carrot_marker.header.stamp = now_msg
+                    carrot_marker.ns = "omega_turn"
+                    carrot_marker.id = 68
+                    carrot_marker.type = Marker.SPHERE
+                    carrot_marker.action = Marker.ADD
+                    carrot_marker.pose.position.x = float(c_pt[0])
+                    carrot_marker.pose.position.y = float(c_pt[1])
+                    carrot_marker.pose.position.z = 0.20
+                    carrot_marker.pose.orientation.w = 1.0
+                    carrot_marker.scale.x = 0.20
+                    carrot_marker.scale.y = 0.20
+                    carrot_marker.scale.z = 0.20
+                    carrot_marker.color.r = 1.0
+                    carrot_marker.color.g = 0.1
+                    carrot_marker.color.b = 0.1
+                    carrot_marker.color.a = 0.95
+                    marker_arr.markers.append(carrot_marker)
+
+            # ── 7. Bảng chấm điểm & Tiến độ nhiệm vụ (HUD Marker) ──────
+            cur_state = self.fsm.get_state()
+            is_uturn = (cur_state == FSMState.UTURN_PLANNING or
+                        (cur_state == FSMState.PATH_FOLLOWING and self.fsm.state_before_planning == FSMState.UTURN_PLANNING) or
+                        cur_state == FSMState.UTURN_EXECUTION)
+
+            p1_prog = 0.0
+            p2_prog = 0.0
+            p3_prog = 0.0
+            total_score = 0.0
+            status_text = ""
+
+            if self.current_lane_idx == 1 and not is_uturn:
+                p1_prog = min(100.0, max(0.0, (self.current_x / max(0.1, L)) * 100.0))
+                total_score = p1_prog * 0.40
+                status_text = "BAM LUONG 1 (CNN)"
+            elif is_uturn:
+                p1_prog = 100.0
+                accum_deg = math.degrees(abs(getattr(self, 'uturn_accum_imu_yaw', 0.0)))
+                p2_prog = min(100.0, (accum_deg / 180.0) * 100.0)
+                total_score = 40.0 + p2_prog * 0.30
+                status_text = f"QUAY DAU OMEGA ({accum_deg:.0f} deg/180 deg)"
+            elif self.current_lane_idx == 2:
+                p1_prog = 100.0
+                p2_prog = 100.0
+                run_l2 = max(0.0, L - self.current_x)
+                p3_prog = min(100.0, max(0.0, (run_l2 / max(0.1, L)) * 100.0))
+                total_score = 70.0 + p3_prog * 0.30
+                if cur_state == FSMState.IDLE:
+                    p3_prog = 100.0
+                    total_score = 100.0
+                    status_text = "DA VE DICH (HOAN THANH)!"
+                else:
+                    status_text = "BAM LUONG 2 (CNN)"
+
+            hud_marker = Marker()
+            hud_marker.header.frame_id = frame_id
+            hud_marker.header.stamp = now_msg
+            hud_marker.ns = "mission_hud"
+            hud_marker.id = 1
+            hud_marker.type = Marker.TEXT_VIEW_FACING
+            hud_marker.action = Marker.ADD
+            hud_marker.pose.position.x = float(self.current_x)
+            hud_marker.pose.position.y = float(self.current_y)
+            hud_marker.pose.position.z = 1.35  # Nâng cao lên 1.35m để không che khuất cọc xe
+            hud_marker.pose.orientation.w = 1.0
+            hud_marker.scale.z = 0.22
+            cam_lost = (self._last_image_time == 0.0) or ((time.time() - self._last_image_time) > 2.5)
+            if cam_lost:
+                hud_marker.color.r = 1.0
+                hud_marker.color.g = 0.15
+                hud_marker.color.b = 0.15
+                hud_marker.text = (
+                    f"⚠️ [CANH BAO: CHUA CO TIN HIEU CAMERA!] ⚠️\n"
+                    f"Trang thai: TAM DUNG AN TOAN (Cho hinh anh tu Camera)\n"
+                    f"Vi tri: ({self.current_x:.2f}m, {self.current_y:.2f}m)\n"
+                    f"👉 Kiem tra: Bat DroidCam tren dien thoai hoac cam lai Webcam USB!"
+                )
+            elif not self.is_mission_started:
+                hud_marker.color.r = 1.0
+                hud_marker.color.g = 1.0
+                hud_marker.color.b = 0.2
+                hud_marker.text = (
+                    f"★ [SAN SANG (READY) - DANG CHO LENH RVIZ] ★\n"
+                    f"Trang thai: DUNG YEN CHO LENH (Cam bien & AI da san sang)\n"
+                    f"Vi tri: ({self.current_x:.2f}m, {self.current_y:.2f}m) | Goc: {self.smoothed_angle_deg:+.1f} deg\n"
+                    f"👉 BAM NUT '2D Goal Pose' TREN RVIZ DE XE BAT DAU CHAY!"
+                )
+            else:
+                hud_marker.color.r = 0.2
+                hud_marker.color.g = 1.0
+                hud_marker.color.b = 0.4
+                hud_marker.text = (
+                    f"[TIEN DO NHIEM VU: {total_score:.1f}/100 DIEM]\n"
+                    f"Trang thai: {status_text}\n"
+                    f"Vi tri: ({self.current_x:.2f}m, {self.current_y:.2f}m) | Goc: {self.smoothed_angle_deg:+.1f} deg\n"
+                    f"Tien do: L1: {p1_prog:.0f}% -> Quay: {p2_prog:.0f}% -> L2: {p3_prog:.0f}%"
+                )
+            marker_arr.markers.append(hud_marker)
+
+            self.marker_pub.publish(marker_arr)
+        except Exception as e:
+            self.get_logger().warn(f"Failed to publish mission markers: {e}", throttle_duration_sec=5.0)
 
     def StopRobot(self):
         """Issue zero velocities to the actuators."""
@@ -703,16 +1297,16 @@ class CnnDriverNode(Node):
             self.get_logger().warn("⚠️ [ĐIỀU HƯỚNG CNN] Quá 6s căn chỉnh -> Tự động khôi phục chạy thẳng!")
             return
 
-        # Tăng tốc mềm với mô-men khởi động tức thì (tối thiểu 75% để thắng ma sát tĩnh trên cỏ)
-        ramp = min(1.0, 0.75 + 0.25 * (elapsed / 0.15))
-        base_w = float(getattr(self, 'turn_angular_speed', 0.50))
+        # Tăng tốc mềm với mô-men khởi động tức thì (tối thiểu 80% để bứt phá ma sát tĩnh trên đất gồ ghề)
+        ramp = min(1.0, 0.80 + 0.20 * (elapsed / 0.15))
+        base_w = float(getattr(self, 'turn_angular_speed', 0.65))
         
-        # Đảm bảo sàn tốc độ >= 0.35 rad/s để 4 bánh xoay khỏe khoắn trên cỏ, không bị khựng
+        # Đảm bảo sàn tốc độ >= 0.42 rad/s để 4 động cơ 775 xoay khỏe khoắn trên đất gồ ghề, không bị khựng
         angle_err = abs(self.smoothed_angle_deg)
-        if angle_err < 0.6:
-            target_w = 0.35
-        elif angle_err < 1.0:
-            target_w = 0.42
+        if angle_err < 0.8:
+            target_w = max(0.42, 0.65 * base_w)
+        elif angle_err < 1.4:
+            target_w = max(0.52, 0.80 * base_w)
         else:
             target_w = base_w
 
@@ -880,6 +1474,31 @@ class CnnDriverNode(Node):
                 except Exception as save_err:
                     self.get_logger().error(f"Failed to save diagnostic frame: {save_err}")
 
+        # ── Chế độ chờ lệnh từ RViz (Standby / Ready) ─────────────────
+        if not self.is_mission_started:
+            # Cập nhật các thông số góc lái và độ tin cậy từ Camera / AI
+            if confidence >= self.low_confidence_threshold:
+                self.has_seen_row = True
+                self.smoothed_angle_deg = (
+                    self.ema_alpha * raw_angle + (1.0 - self.ema_alpha) * self.smoothed_angle_deg
+                )
+            else:
+                self.smoothed_angle_deg = raw_angle
+
+            # Đảm bảo động cơ tuyệt đối đứng yên
+            twist.linear.x = 0.0
+            twist.angular.z = 0.0
+            self.cmd_vel_pub.publish(twist)
+
+            # Cập nhật cache trạng thái để in log 1Hz và phục vụ RViz
+            self._last_image_time = time.time()
+            self._latest_confidence = confidence
+            self._latest_steer_deg = self.smoothed_angle_deg
+            self._latest_twist = twist
+            self._latest_gps_info = self.localization_manager.get_gps_coordinates()
+            self._latest_inf_ms = getattr(self, '_last_inference_ms', 0.0)
+            return
+
         # Khi Camera/CNN nhìn thấy hàng (confidence >= low_confidence_threshold):
         # Bám luống ngay lập tức dù đặt xe ở gần hay xa, thẳng hàng hay lệch xéo.
         # Không ràng buộc cứng mét chạy hay điều kiện thành tường.
@@ -973,8 +1592,8 @@ class CnnDriverNode(Node):
                 dir_factor = 1.0 if self.current_lane_idx == 1 else -1.0
                 yaw_err = math.atan2(math.sin(target_yaw - self.current_yaw), math.cos(target_yaw - self.current_yaw))
 
-                # Tính góc bẻ lái hỗ trợ đưa xe về tim luống
-                assist_steer_deg = float(np.clip(-12.0 * lat_err * dir_factor + math.degrees(yaw_err) * 0.4, -10.0, 10.0))
+                # Tính góc bẻ lái hỗ trợ đưa xe về tim luống (Chuẩn quy ước: lệch phải y < 0 -> steer âm để bẻ Trái)
+                assist_steer_deg = float(np.clip(12.0 * lat_err * dir_factor - math.degrees(yaw_err) * 0.4, -10.0, 10.0))
                 self.smoothed_angle_deg = (
                     0.25 * assist_steer_deg + 0.75 * self.smoothed_angle_deg
                 )
@@ -1002,8 +1621,8 @@ class CnnDriverNode(Node):
             # 1. Khi đang chạy bình thường (|góc| <= 0.3°): Xe chạy tiến 0.10 m/s, tự bù lái mềm để giữ luống.
             # 2. Khi góc lệch > 0.3°: Dừng tiến, xoay từ từ tại chỗ với lực vừa đủ (~0.28 rad/s, hãm về 0.18 rad/s).
             # 3. Khi góc giảm về <= 0.3°: Ngừng xoay, tiếp tục chạy thẳng và giãn cách an toàn 1.2s.
-            stop_threshold = float(getattr(self, 'turn_in_place_threshold_deg', 0.30))
-            resume_threshold = float(getattr(self, 'turn_in_place_resume_deg', 0.30))
+            stop_threshold = float(getattr(self, 'turn_in_place_threshold_deg', 1.20))
+            resume_threshold = float(getattr(self, 'turn_in_place_resume_deg', 0.60))
 
             if self.is_adjusting_heading:
                 # Kiểm tra đã thẳng hàng chưa (<= resume_threshold = 0.3°)
@@ -1063,7 +1682,7 @@ class CnnDriverNode(Node):
                 fwd_ramp = min(1.0, time_since_resume / 0.35) if time_since_resume < 0.35 else 1.0
                 lin_speed = self.linear_speed * fwd_ramp
                 # Khi đang chạy thẳng, bù lái nhẹ nhàng liên tục để giữ luống ổn định không khựng xe:
-                ang_vel = float(np.clip(-0.035 * self.smoothed_angle_deg, -0.10, 0.10))
+                ang_vel = float(np.clip(-0.040 * self.smoothed_angle_deg, -0.12, 0.12))
 
             twist.linear.x = lin_speed
             twist.angular.z = ang_vel
@@ -1406,7 +2025,12 @@ class CnnDriverNode(Node):
         gps_source = self._latest_gps_info.get('source', '')
         gps_str = f" | GPS: {self._latest_gps_info.get('latitude', 0.0):.5f}°, {self._latest_gps_info.get('longitude', 0.0):.5f}°" if (gps_status == 'FIX' and gps_source == 'DIRECT_SENSOR') else ""
 
-        display_state_str = "CHỈNH GÓC" if self.is_adjusting_heading else str(current_state)
+        if not self.is_mission_started:
+            display_state_str = "CHỜ RVIZ"
+        elif self.is_adjusting_heading:
+            display_state_str = "CHỈNH GÓC"
+        else:
+            display_state_str = str(current_state)
         status_msg = (
             f"🌾 [AI Lái Xe] Luống {self.current_lane_idx} (x={self.current_x:4.2f}m) | "
             f"Góc: {self._latest_steer_deg:+5.2f}° | "

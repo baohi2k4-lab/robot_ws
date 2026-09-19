@@ -111,7 +111,7 @@ class ESP32Bridge(Node):
         self.target_rpm_right = 0.0
         self.current_rpm_left = 0.0
         self.current_rpm_right = 0.0
-        self.max_rpm_accel = 35.0  # RPM/s — Tăng/giảm tốc mềm chống trượt bánh và chống văng xe
+        self.max_rpm_accel = 45.0  # RPM/s — Tăng/giảm tốc dứt khoát đủ lực bứt phá đất gồ ghề nhưng không trượt bánh
         self._serial_rx_buffer = ''
 
         # ── Loop Timer (20 Hz for Odom processing & continuous ESP32 streaming) ──

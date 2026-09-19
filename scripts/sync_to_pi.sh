@@ -62,6 +62,10 @@ rsync -avz --progress \
   "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/src/my_robot_navigation/"
 
 rsync -avz --progress \
+  "$WS_DIR/src/esp32_source/" \
+  "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/src/esp32_source/"
+
+rsync -avz --progress \
   "$WS_DIR/aliases.sh" \
   "$WS_DIR/cyclonedds.xml" \
   "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/"

@@ -22,12 +22,12 @@ cnn_driver_node:
 
     mask_threshold: 0.35        # cao hơn sim vì model nhận diện ảnh thật tốt hơn
 
-    # Tốc độ di chuyển (m/s) — Chạy thẳng ổn định, dừng xoay căn chỉnh khi lệch > 0.3°
-    linear_speed: 0.10
-    turn_linear_speed: 0.10
-    turn_angular_speed: 0.50          # rad/s — Vận tốc góc xoay căn chỉnh (tăng lực mô-men xoắn xoay khỏe trên cỏ)
-    turn_in_place_threshold_deg: 0.3  # Ngưỡng dừng xoay căn chỉnh hướng: khi góc CNN lệch > 0.3°
-    turn_in_place_resume_deg: 0.3     # Ngưỡng dừng việc xoay: góc thẳng <= 0.3° mới tiếp tục chạy thẳng
+    # Tốc độ di chuyển (m/s) — Chạy chậm đầm xe (7.5 cm/s), chống trượt bánh và bảo vệ IMU trên đất gồ ghề
+    linear_speed: 0.075
+    turn_linear_speed: 0.00           # Dừng hẳn khi xoay nắn góc (không vừa xoay vừa lết tới, tránh đâm gốc cây)
+    turn_angular_speed: 0.65          # rad/s — Vận tốc góc xoay căn chỉnh (mô-men xoắn mạnh mẽ bứt phá ma sát đất gồ ghề)
+    turn_in_place_threshold_deg: 1.2  # Ngưỡng dừng xoay tại chỗ: lệch > 1.2° là dừng nắn góc dứt khoát
+    turn_in_place_resume_deg: 0.6     # Ngưỡng xong việc xoay: góc thẳng <= 0.6° mới cho chạy thẳng tiếp
 
     # Bộ điều khiển trượt SMC bám luống với lực bẻ lái mạnh mẽ, dứt khoát
     lambda_smc: 2.5             # hệ số bề mặt trượt S = de + lambda * e
@@ -53,6 +53,7 @@ cnn_driver_node:
     max_row_length: 10.0          # m — giới hạn an toàn tối đa
 
     # ── Điều Phối Nhiệm Vụ 2 Luống Thực Nghiệm (3 hàng thùng, 2 luống) ──
+    wait_for_rviz_start: true      # Khi bật node, xe đứng yên chờ lệnh từ RViz (2D Goal Pose) mới chạy
     enable_mission_goals: true      # Giám sát 4 điểm mốc (Start -> Goal 1 -> Goal 2 -> Goal 3)
     enable_global_plan_assist: true # Hỗ trợ song song cùng CNN giữ đúng tim luống
     field_length: 3.0              # m — Chiều dài mỗi luống (3.0m)
@@ -67,12 +68,12 @@ cnn_driver_node:
     goal_3_x: 0.0                  # m — Cuối Luống 2 (về đích dừng xe an toàn)
     goal_3_y: -1.20                # m
 
-    # ── Tham số Quỹ Đạo Omega Turn (Chống trượt bánh vi sai) ────────
+    # ── Tham số Quỹ Đạo Omega Turn (Chống trượt bánh vi sai cho xe 58x60cm) ────────
     turn_side: 'RIGHT'             # Chuyển sang luống bên phải (y = -1.20m)
     omega_open_angle_deg: 35.0     # độ — Góc mở cua trái
-    omega_r1: 0.65                 # m — Bán kính cung mở trái
-    omega_clearance: 0.25          # m — Đoạn thẳng thoát đầu luống
-    omega_lead_in: 0.40            # m — Đoạn dẫn thẳng vào tim Luống 2
+    omega_r1: 0.85                 # m — Bán kính cung mở trái (nâng từ 0.65 lên 0.85m chống cày đất vi sai)
+    omega_clearance: 0.55          # m — Đoạn thẳng thoát đầu luống (nâng từ 0.25 lên 0.55m chống chém đuôi xe vào thùng)
+    omega_lead_in: 0.50            # m — Đoạn dẫn thẳng vào tim Luống 2 (nâng từ 0.40 lên 0.50m nắn thẳng camera)
 
     warmup_time: 3.0
     drive_out_time: 2.0
@@ -100,7 +101,7 @@ bts7960_driver_node:
   ros__parameters:
     wheel_base: 0.58            # m (đo thực tế khoảng cách tâm 2 bánh)
     max_linear_speed: 0.18      # m/s = 100% PWM (tăng nhẹ dải trần để mở rộng dải PWM quay xe)
-    min_duty_cycle: 22.0        # % — Nâng lên 32% để motor luôn đủ momen xoắn đẩy xe vượt ma sát tĩnh trên cỏ/đất
+    min_duty_cycle: 30.0        # % — Nâng lên 30% để motor luôn đủ momen xoắn đẩy xe vượt ma sát tĩnh trên đất gồ ghề
     pwm_frequency: 1000         # Hz
 
     # GPIO BCM pin numbers — chỉnh theo sơ đồ nối dây thực tế

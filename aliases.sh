@@ -545,6 +545,8 @@ send_nav_goal() {
 }
 alias send-goal="send_nav_goal"
 alias test-goal="send_nav_goal"
+alias chay-xe="ros2 topic pub --once /start_mission std_msgs/msg/Empty '{}'; echo '🚀 Đã gửi lệnh xuất phát xe!'"
+alias bat-xe="chay-xe"
 
 # Lệnh kích hoạt xe THẬT CÓ QUAY VIDEO THÔ (100% Raw, không hiện gì trên màn hình)
 real-record() {
@@ -1054,6 +1056,7 @@ cat << 'EOF'
   real-robot         : BẬT XE THẬT (Tự động chạy Madgwick + EKF chuẩn xác)
   real-record [tên]  : BẬT XE THẬT + QUAY VIDEO THÔ (100% Raw, lưu MP4 vào Pi)
   real-cnn           : BẬT XE THẬT TỰ HÀNH BÁM LUỐNG BẰNG AI CNN (Tự động lưu toàn bộ log & góc lái)
+  chay-xe (bat-xe)   : Gửi lệnh xuất phát cho xe chạy (nếu không bấm 2D Goal Pose trên RViz)
   xem-lai (xem-log)  : Xem báo cáo phân tích góc lái, tốc độ, độ tin cậy AI của lần chạy gần nhất
   tail-log           : Xem luồng log terminal thời gian thực của real-cnn
   mo-log             : Liệt kê toàn bộ các file log CSV & Text trong robot_ws/logs/
