@@ -15,7 +15,7 @@ import math
 import cv2
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image, LaserScan, NavSatFix, NavSatStatus, Imu
 from geometry_msgs.msg import Twist, Point, PoseStamped
 from nav_msgs.msg import Odometry, Path as RosPath
@@ -393,10 +393,19 @@ class CnnDriverNode(Node):
                 Imu, '/imu', self.imu_callback, 10)
 
         # ── Remote CNN Offloading (Laptop gánh phần suy luận ONNX) ───────
+        # QoS BEST_EFFORT + depth=1: bỏ gói cũ, chỉ dùng kết quả mới nhất
+        # → Khớp với publisher trên laptop (cnn_inference_server.py)
+        # → Giảm trễ tối đa, tránh hàng đợi tích lũy
+        _qos_realtime = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self._remote_cnn_data = None
         self._remote_cnn_time = 0.0
         self.crop_row_sub = self.create_subscription(
-            Float32MultiArray, '/crop_row/detection', self.remote_cnn_callback, 10
+            Float32MultiArray, '/crop_row/detection', self.remote_cnn_callback, _qos_realtime
         )
 
         # Cho phép người dùng tự chấm điểm Goal trực tiếp trên RViz bằng công cụ 2D Goal Pose
