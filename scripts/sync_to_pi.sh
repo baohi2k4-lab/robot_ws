@@ -62,6 +62,12 @@ rsync -avz --progress \
   "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/src/my_robot_navigation/"
 
 rsync -avz --progress \
+  --exclude '__pycache__' \
+  --exclude '*.pyc' \
+  "$WS_DIR/src/my_robot_description/" \
+  "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/src/my_robot_description/"
+
+rsync -avz --progress \
   "$WS_DIR/src/esp32_source/" \
   "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/src/esp32_source/"
 

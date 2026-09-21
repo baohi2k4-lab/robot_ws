@@ -163,14 +163,6 @@ alias rviz-cam="rviz_record_func"
 
 rviz_view_func() {
     load_ws
-    mkdir -p "$WS_DIR/logs"
-    pkill -f "my_robot_bringup.*wifi_cam_receiver" 2>/dev/null || true
-    sleep 0.2
-    echo "📷 [LAPTOP-VIEW] Đang khởi động bộ thu & giải mã Camera Wi-Fi từ Pi..."
-    ros2 run my_robot_bringup wifi_cam_receiver > "$WS_DIR/logs/wifi_cam_receiver.log" 2>&1 &
-    local receiver_pid=$!
-    sleep 0.8
-
     local rviz_file=""
     for cand in \
         "$WS_DIR/src/my_robot_description/rviz/display.rviz" \
@@ -183,19 +175,20 @@ rviz_view_func() {
         fi
     done
 
+    export QT_QPA_PLATFORM=xcb
+    echo "🖥️ [RVIZ] Đang khởi động giao diện điều khiển 3D..."
     if [ -n "$rviz_file" ]; then
         rviz2 -d "$rviz_file" "$@"
     else
         rviz2 "$@"
     fi
-    kill -9 $receiver_pid 2>/dev/null || true
-    pkill -f "my_robot_bringup.*wifi_cam_receiver" 2>/dev/null || true
 }
 alias rviz="rviz_view_func"
 alias laptop-view="rviz_view_func"
 
 rviz_only_func() {
     load_ws
+    export QT_QPA_PLATFORM=xcb
     local rviz_file=""
     for cand in \
         "$WS_DIR/src/my_robot_description/rviz/display.rviz" \
@@ -362,6 +355,9 @@ real_robot_func() {
     fi
 }
 alias real-robot="real_robot_func"
+alias real-hw="real-robot enable_camera:=false"
+alias xe-that-hw="real-robot enable_camera:=false"
+alias hw-only="real-robot enable_camera:=false"
 alias real-slam="load_ws && ros2 launch my_robot_bringup real_slam.launch.py"
 
 # Lệnh TỰ HÀNH XE THẬT NGOÀI TRỜI VỚI NAV2 (Odom-Only, không cần bản đồ)
@@ -519,6 +515,24 @@ laptop_cnn_func() {
 alias laptop-cnn="laptop_cnn_func"
 alias cnn-laptop="laptop_cnn_func"
 alias offload-cnn="laptop_cnn_func"
+
+# Lệnh CHẠY CAMERA CẮM TRỰC TIẾP VÀO LAPTOP + AI CNN ĐIỀU KHIỂN XE THẬT
+# - Pi (Xe thật): Chạy 'real-hw' (chỉ bật phần cứng ESP32 + LiDAR + IMU + GPS + EKF, không bật camera)
+# - Laptop: Cắm cáp RealSense D435 hoặc iPhone vào cổng USB Laptop, chạy: 'laptop-ai'
+laptop_ai_func() {
+    load_ws
+    echo "================================================================================"
+    echo "💻 [LAPTOP-AI] KHỞI ĐỘNG CAMERA USB TRÊN LAPTOP + AI CNN ĐIỀU KHIỂN XE THẬT"
+    echo "   📷 Camera cắm trực tiếp cổng USB Laptop (0ms trễ)"
+    echo "   ⚡ Model ONNX chạy GPU/CPU Laptop (30 - 60 FPS)"
+    echo "   📡 Nhận LiDAR/IMU/GPS từ Pi ➔ Bắn lệnh /cmd_vel sang Pi lái 4 bánh"
+    echo "================================================================================"
+    ros2 launch my_robot_bringup laptop_ai.launch.py "$@"
+}
+alias laptop-ai="laptop_ai_func"
+alias xe-laptop="laptop_ai_func"
+alias ai-laptop="laptop_ai_func"
+alias lap-ai="laptop_ai_func"
 
 # Lệnh KIỂM TRA CHẨN ĐOÁN TOÀN DIỆN CHUỖI AI CNN
 alias check-cnn="load_ws && python3 \"$WS_DIR/scripts/verify_cnn_pipeline.py\""

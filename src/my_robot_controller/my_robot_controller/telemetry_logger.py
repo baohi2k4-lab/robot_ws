@@ -79,6 +79,16 @@ class TelemetryLogger:
             'Event'
         ]
 
+        self.turn_scores_csv = os.path.join(self.log_dir, "omega_turn_scores.csv")
+        self.turn_score_headers = [
+            'Time', 'Unix_Timestamp', 'Total_Score', 'Grade', 'Grade_Desc',
+            'Duration_s', 'Rel_dY_m', 'Err_dY_m', 'Score_dY',
+            'Rel_Yaw_deg', 'Err_Yaw_deg', 'Score_Yaw',
+            'Avg_Slip_pct', 'Score_Slip',
+            'CNN_Conf', 'Score_Vision',
+            'RMSE_CTE_m', 'Num_Samples', 'Num_GPS_Samples'
+        ]
+
         if self.enable_csv and not os.path.exists(self.csv_filename):
             try:
                 with open(self.csv_filename, mode='w', newline='') as f:
@@ -88,6 +98,15 @@ class TelemetryLogger:
                 self._update_symlink(self.csv_filename, self.latest_csv_filename)
             except Exception as e:
                 print(f"[TelemetryLogger Error] Failed to initialize CSV: {e}")
+
+        if self.enable_csv and not os.path.exists(self.turn_scores_csv):
+            try:
+                with open(self.turn_scores_csv, mode='w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(self.turn_score_headers)
+                    f.flush()
+            except Exception as e:
+                print(f"[TelemetryLogger Error] Failed to initialize turn scores CSV: {e}")
 
         if self.enable_text_log:
             start_header = (
@@ -183,6 +202,47 @@ class TelemetryLogger:
                 f.flush()
         except Exception as e:
             print(f"[TelemetryLogger Error] Failed to write text log: {e}")
+
+    def log_turn_evaluation(self, eval_result: dict):
+        """
+        Ghi nhận kết quả đánh giá quay đầu Omega Turn vào tệp omega_turn_scores.csv.
+        """
+        if not self.enable_csv or not eval_result:
+            return
+
+        now_sec = time.time()
+        time_str = datetime.fromtimestamp(now_sec).strftime("%H:%M:%S.%f")[:-3]
+        sb = eval_result.get('score_breakdown', {})
+
+        row = [
+            time_str,
+            f"{now_sec:.3f}",
+            f"{eval_result.get('total_score', 0.0):.1f}",
+            eval_result.get('grade', 'F'),
+            eval_result.get('grade_desc', 'UNKNOWN'),
+            f"{eval_result.get('duration_s', 0.0):.1f}",
+            f"{eval_result.get('final_rel_y', 0.0):.3f}",
+            f"{eval_result.get('err_dy_m', 0.0):.3f}",
+            f"{sb.get('score_dy', 0.0):.1f}",
+            f"{eval_result.get('final_rel_yaw_deg', 0.0):.1f}",
+            f"{eval_result.get('err_yaw_deg', 0.0):.1f}",
+            f"{sb.get('score_yaw', 0.0):.1f}",
+            f"{eval_result.get('avg_slip_percent', 0.0):.1f}",
+            f"{sb.get('score_slip', 0.0):.1f}",
+            f"{eval_result.get('cnn_confidence', 0.0):.3f}",
+            f"{sb.get('score_vision', 0.0):.1f}",
+            f"{eval_result.get('rmse_cte_m', 0.0):.3f}",
+            eval_result.get('num_samples', 0),
+            eval_result.get('num_gps_samples', 0),
+        ]
+
+        try:
+            with open(self.turn_scores_csv, mode='a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(row)
+                f.flush()
+        except Exception as e:
+            print(f"[TelemetryLogger Error] Failed to write turn scores CSV: {e}")
 
 
 def main(args=None):

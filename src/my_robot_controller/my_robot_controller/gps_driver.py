@@ -19,6 +19,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix, NavSatStatus
 from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TwistStamped
 
 try:
     import serial
@@ -69,6 +70,7 @@ class GpsDriverNode(Node):
         self.declare_parameter('baudrate', 38400)
         self.declare_parameter('frame_id', 'gps_link')
         self.declare_parameter('publish_topic', '/gps/fix')
+        self.declare_parameter('vel_publish_topic', '/gps/vel')
 
         # Tham số bộ lọc 4 lớp
         self.declare_parameter('min_satellites', 5)              # Lớp 1: Tối thiểu 5 vệ tinh
@@ -83,6 +85,7 @@ class GpsDriverNode(Node):
         self.baudrate = self.get_parameter('baudrate').value
         self.frame_id = self.get_parameter('frame_id').value
         self.publish_topic = self.get_parameter('publish_topic').value
+        self.vel_publish_topic = self.get_parameter('vel_publish_topic').value
 
         self.min_satellites = int(self.get_parameter('min_satellites').value)
         self.max_hdop = float(self.get_parameter('max_hdop').value)
@@ -105,9 +108,12 @@ class GpsDriverNode(Node):
         self.is_robot_moving = False
         self.stationary_lat = None
         self.stationary_lon = None
+        self.last_doppler_speed = 0.0
+        self.last_cog_deg = 0.0
 
         # ── 3. Publishers & Subscribers ───────────────────────────────────
         self.publisher_ = self.create_publisher(NavSatFix, self.publish_topic, 10)
+        self.vel_publisher_ = self.create_publisher(TwistStamped, self.vel_publish_topic, 10)
         self.odom_sub = self.create_subscription(Odometry, '/wheel/odom', self.odom_callback, 10)
 
         # ── 4. Kết nối Serial Hardware ────────────────────────────────────
@@ -128,7 +134,7 @@ class GpsDriverNode(Node):
             f"🛡️ [GPS Filter] Đã kích hoạt Bộ Lọc 4 Lớp: "
             f"[Min Sats: {self.min_satellites} | Max HDOP: {self.max_hdop:.1f} | "
             f"Max Jump: {self.max_distance_jump:.1f}m | Median: {self.median_window_size} mẫu | "
-            f"Stationary Lock: {self.stationary_lock_enabled}]"
+            f"Stationary Lock: {self.stationary_lock_enabled}] | Pub: {self.publish_topic} & {self.vel_publish_topic}"
         )
 
     def odom_callback(self, msg: Odometry):
@@ -154,8 +160,48 @@ class GpsDriverNode(Node):
                 line = self.ser.readline().decode('ascii', errors='ignore').strip()
                 if line.startswith('$GPGGA') or line.startswith('$GNGGA'):
                     self.parse_gga(line)
+                elif line.startswith('$GPRMC') or line.startswith('$GNRMC'):
+                    self.parse_rmc(line)
         except Exception as e:
             self.get_logger().error(f"Lỗi đọc dữ liệu Serial GPS: {e}")
+
+    def parse_rmc(self, line):
+        """
+        Phân tích cú pháp bản tin RMC để trích xuất vận tốc Doppler (Speed Over Ground)
+        và góc hướng di chuyển (Course Over Ground):
+        $GNRMC,hhmmss.ss,status,lat,lat_dir,lon,lon_dir,speed_knots,track_deg,ddmmyy,mag_var,var_dir,mode*cs
+        """
+        parts = line.split(',')
+        if len(parts) < 9:
+            return
+        status = parts[2]
+        if status != 'A':
+            return
+
+        try:
+            speed_knots = float(parts[7]) if parts[7] else 0.0
+            speed_mps = speed_knots * 0.5144444444444445
+        except ValueError:
+            speed_mps = 0.0
+
+        try:
+            cog_deg = float(parts[8]) if parts[8] else 0.0
+        except ValueError:
+            cog_deg = 0.0
+
+        self.last_doppler_speed = speed_mps
+        self.last_cog_deg = cog_deg
+
+        vel_msg = TwistStamped()
+        vel_msg.header.stamp = self.get_clock().now().to_msg()
+        vel_msg.header.frame_id = self.frame_id
+        vel_msg.twist.linear.x = speed_mps
+        vel_msg.twist.linear.y = 0.0
+        vel_msg.twist.linear.z = 0.0
+        vel_msg.twist.angular.x = 0.0
+        vel_msg.twist.angular.y = 0.0
+        vel_msg.twist.angular.z = math.radians(cog_deg)
+        self.vel_publisher_.publish(vel_msg)
 
     def parse_gga(self, line):
         """

@@ -12,7 +12,7 @@
 # ── 1. TẦNG CỤC BỘ: EKF 1 LOCAL (Odometry trơn mượt cho Local Planner Nav2) ────
 ekf_filter_node_local:
   ros__parameters:
-    frequency: 20.0
+    frequency: 15.0
     sensor_timeout: 0.1
     two_d_mode: true
     transform_time_offset: 0.08
@@ -83,7 +83,7 @@ ekf_filter_node_local:
 # ── 2. CẦU NỐI GPS: NAVSAT TRANSFORM (Chuyển đổi Kinh/Vĩ độ sang Tọa độ Mét) ──
 navsat_transform_node:
   ros__parameters:
-    frequency: 20.0
+    frequency: 15.0
     delay: 3.0
     magnetic_declination_radians: -0.01   # Độ lệch từ trường tại Việt Nam (~ -0.6°)
     yaw_offset: 0.0                       # Căn chỉnh góc 0 theo trục Bắc (ENU)
@@ -97,7 +97,7 @@ navsat_transform_node:
 # ── 3. TẦNG TOÀN CỤC: EKF 2 GLOBAL (Dung hợp GPS cho Toàn bộ Bản đồ Nav2) ─────
 ekf_filter_node_global:
   ros__parameters:
-    frequency: 20.0
+    frequency: 15.0
     sensor_timeout: 0.1
     two_d_mode: true
     transform_time_offset: 0.08

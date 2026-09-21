@@ -38,7 +38,9 @@ from my_robot_controller.omega_planner import OmegaTurnPlanner
 from my_robot_controller.lidar_processor import LidarProcessor
 from my_robot_controller.perception_manager import PerceptionManager, EndOfRowDetector
 from my_robot_controller.localization_manager import LocalizationManager
+from geometry_msgs.msg import TwistStamped
 from my_robot_controller.telemetry_logger import TelemetryLogger
+from my_robot_controller.omega_evaluator import OmegaTurnEvaluator
 
 
 
@@ -406,6 +408,13 @@ class CnnDriverNode(Node):
             Empty, '/start_mission', self.start_mission_callback, 10
         )
 
+        # ── Đo lường vận tốc Doppler GPS NEO-M10 & Đánh giá Omega Turn ───
+        self.latest_gps_speed = None
+        self.gps_vel_sub = self.create_subscription(
+            TwistStamped, '/gps/vel', self.gps_vel_callback, 10
+        )
+        self.omega_evaluator = OmegaTurnEvaluator()
+
         self.get_logger().info(
             f"🚀 [AI CNN Driver] Sẵn sàng tự hành bám luống (Vận tốc: {self.linear_speed:.2f} m/s | Model INT8)"
         )
@@ -420,6 +429,10 @@ class CnnDriverNode(Node):
         self._latest_gps_info = {}
         self._latest_inf_ms = 0.0
         self.status_timer = self.create_timer(1.0, self.status_timer_callback)
+
+    def gps_vel_callback(self, msg: TwistStamped):
+        """Tiếp nhận vận tốc Doppler tức thời từ GPS NEO-M10 (/gps/vel)."""
+        self.latest_gps_speed = msg.twist.linear.x
 
     def start_mission_callback(self, msg: Empty):
         """Nhận tín hiệu kích hoạt xuất phát từ topic /start_mission."""
@@ -1061,11 +1074,15 @@ class CnnDriverNode(Node):
                 hud_marker.color.r = 0.2
                 hud_marker.color.g = 1.0
                 hud_marker.color.b = 0.4
+                eval_hud = ""
+                if hasattr(self, 'omega_evaluator') and self.omega_evaluator.latest_result:
+                    eval_hud = f"\n{self.omega_evaluator.get_hud_string()}"
                 hud_marker.text = (
                     f"[TIEN DO NHIEM VU: {total_score:.1f}/100 DIEM]\n"
                     f"Trang thai: {status_text}\n"
                     f"Vi tri: ({self.current_x:.2f}m, {self.current_y:.2f}m) | Goc: {self.smoothed_angle_deg:+.1f} deg\n"
                     f"Tien do: L1: {p1_prog:.0f}% -> Quay: {p2_prog:.0f}% -> L2: {p3_prog:.0f}%"
+                    f"{eval_hud}"
                 )
             marker_arr.markers.append(hud_marker)
 
@@ -1844,6 +1861,17 @@ class CnnDriverNode(Node):
             if waypoints:
                 self.pure_pursuit_controller.set_path(waypoints)
                 self.last_visited_lane = 'lane_lower' if target_y < 0 else 'lane_upper'
+                # Kích hoạt đánh giá quay đầu Omega Turn với hệ quy chiếu tương đối
+                target_dy = -self.row_spacing if self.turn_side.upper() == 'RIGHT' else self.row_spacing
+                if hasattr(self, 'omega_evaluator'):
+                    self.omega_evaluator.start_turn(
+                        start_x=self.current_x,
+                        start_y=self.current_y,
+                        start_yaw=self.current_yaw,
+                        target_dy=target_dy,
+                        target_yaw_deg=180.0,
+                        reference_waypoints=waypoints
+                    )
                 self.transition_to_state(FSMState.PATH_FOLLOWING, now)
                 self.get_logger().info(f"🚀 Bắt đầu bám quỹ đạo Omega Turn ({len(waypoints)} điểm, R1={self.omega_r1:.2f}m, mở góc={self.omega_open_angle_deg}°)...")
             else:
@@ -1858,6 +1886,15 @@ class CnnDriverNode(Node):
             is_uturn = (self.fsm.state_before_planning == FSMState.UTURN_PLANNING)
             
             if is_uturn:
+                # Cập nhật dữ liệu đánh giá tương đối & Doppler GPS tức thời
+                if hasattr(self, 'omega_evaluator'):
+                    self.omega_evaluator.update_step(
+                        current_x=self.current_x,
+                        current_y=self.current_y,
+                        current_yaw=self.current_yaw,
+                        v_odom=self.localization_manager.linear_velocity,
+                        v_gps=self.latest_gps_speed
+                    )
                 current_imu_yaw = self.localization_manager.imu_yaw
                 turn_angle_deg = np.rad2deg(self.uturn_accum_imu_yaw)
                 is_turned_around = (turn_angle_deg >= 140.0)
@@ -2159,6 +2196,21 @@ class CnnDriverNode(Node):
             self.row_completed = False
             self.eor_detected = False
             self.accumulated_turn_angle = 0.0
+
+            # ── Chấm điểm & Đánh giá hiệu năng quay đầu Omega Turn ─────
+            if hasattr(self, 'omega_evaluator') and self.omega_evaluator.is_evaluating:
+                eval_res = self.omega_evaluator.finalize_evaluation(
+                    final_confidence=getattr(self, '_latest_confidence', 0.0),
+                    final_x=self.current_x,
+                    final_y=self.current_y,
+                    final_yaw=self.current_yaw
+                )
+                summary_text = self.omega_evaluator.get_summary_text()
+                self.get_logger().info(f"\n{summary_text}")
+                if self.enable_file_logging and self.telemetry_logger:
+                    self.telemetry_logger.log_event("OMEGA_EVALUATION", summary_text)
+                    if hasattr(self.telemetry_logger, 'log_turn_evaluation'):
+                        self.telemetry_logger.log_turn_evaluation(eval_res)
         else:
             self.inside_row = True
 
