@@ -863,6 +863,70 @@ alias ve-truong="switch_school_func"
 alias check-wifi="nmcli -t -f NAME,DEVICE connection show --active | grep wifi && echo '📍 IP:' && hostname -I"
 alias xem-mang="check-wifi"
 
+# =====================================================
+# KẾT NỐI TRỰC TIẾP LAPTOP ↔ PI QUA CÁP ETHERNET
+# (Độ trễ < 1ms, tốt nhất cho điều khiển AI real-time)
+# =====================================================
+setup_eth_direct_func() {
+    # Tự động tìm cổng Ethernet vật lý (bỏ qua lo, wlo, wlan)
+    local eth_iface
+    eth_iface=$(ip link show | grep -v 'lo\|wlo\|wlan\|LOOPBACK' | grep -oP '^\d+: \K[^:@]+' | head -1)
+    if [ -z "$eth_iface" ]; then
+        echo "❌ Không tìm thấy cổng Ethernet! Hãy cắm USB-to-Ethernet adapter trước."
+        echo "   Sau khi cắm, chạy lại: setup-eth-direct"
+        echo "   Xem interface mới: ip link show"
+        return 1
+    fi
+    local LAPTOP_IP="192.168.10.1"
+    local PI_IP_ETH="192.168.10.2"
+    echo "🔌 [ETH DIRECT] Cổng tìm thấy: $eth_iface"
+    echo "   Laptop IP: $LAPTOP_IP | Pi IP: $PI_IP_ETH"
+    # Gán IP tĩnh
+    sudo ip addr flush dev "$eth_iface" 2>/dev/null || true
+    sudo ip addr add "${LAPTOP_IP}/24" dev "$eth_iface"
+    sudo ip link set "$eth_iface" up
+    # Cập nhật CycloneDDS dùng unicast IP mới
+    cat > "$WS_DIR/cyclonedds.xml" <<XMLEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<CycloneDDS xmlns="https://cdds.io/config">
+  <Domain>
+    <General>
+      <NetworkInterfaceAddress>${eth_iface}</NetworkInterfaceAddress>
+      <AllowMulticast>false</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>100</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address="${PI_IP_ETH}"/>
+        <Peer address="${LAPTOP_IP}"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
+XMLEOF
+    export CYCLONEDDS_URI="file://$WS_DIR/cyclonedds.xml"
+    export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+    export ROS_DOMAIN_ID=42
+    echo ""
+    echo "✅ [ETH DIRECT] Cấu hình xong!"
+    echo "   📡 ROS 2 sẽ dùng: $eth_iface (unicast, không multicast)"
+    echo "   ⚡ Độ trễ kỳ vọng: < 1ms"
+    echo ""
+    echo "👉 Bước tiếp theo — Trên Pi chạy:"
+    echo "   sudo ip addr add ${PI_IP_ETH}/24 dev eth0"
+    echo "   sudo ip link set eth0 up"
+    echo "   export ROS_DOMAIN_ID=42"
+    echo "   export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"
+    echo ""
+    echo "👉 Test kết nối:"
+    echo "   ping ${PI_IP_ETH}"
+}
+alias setup-eth-direct="setup_eth_direct_func"
+alias ket-noi-cap="setup_eth_direct_func"
+alias eth-direct="setup_eth_direct_func"
+
 # Lệnh tải video từ Pi xuống Laptop (Chạy trên Laptop) — tự động tìm Pi
 get-video() {
     local pi_ip="${1:-}"
