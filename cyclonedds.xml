@@ -2,21 +2,16 @@
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain>
     <General>
-      <AllowMulticast>true</AllowMulticast>
+      <AllowMulticast>false</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
     </General>
     <Discovery>
-      <Peers>
-        <Peer address="10.10.178.200"/>
-        <Peer address="10.10.177.141"/>
-        <Peer address="10.10.160.2"/>
-        <Peer address="10.10.191.255"/>
-        <Peer address="172.20.10.255"/>
-        <Peer address="172.20.10.1"/>
-        <Peer address="255.255.255.255"/>
-      </Peers>
       <ParticipantIndex>auto</ParticipantIndex>
       <MaxAutoParticipantIndex>100</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address="192.168.10.2"/>
+        <Peer address="192.168.10.1"/>
+      </Peers>
     </Discovery>
   </Domain>
 </CycloneDDS>

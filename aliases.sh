@@ -891,7 +891,6 @@ setup_eth_direct_func() {
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain>
     <General>
-      <NetworkInterfaceAddress>${eth_iface}</NetworkInterfaceAddress>
       <AllowMulticast>false</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
     </General>
