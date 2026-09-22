@@ -39,7 +39,7 @@ load_ws() {
     export PYTHONUNBUFFERED=1
     export RCUTILS_LOGGING_BUFFERED_STREAM=0
 
-    export ROS_DOMAIN_ID=0
+    export ROS_DOMAIN_ID=42
     export ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
     if [ -f "/opt/ros/jazzy/lib/librmw_cyclonedds_cpp.so" ] || [ -f "/opt/ros/humble/lib/librmw_cyclonedds_cpp.so" ] || [ -f "/usr/lib/librmw_cyclonedds_cpp.so" ]; then
         export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
