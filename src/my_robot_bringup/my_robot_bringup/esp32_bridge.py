@@ -45,8 +45,8 @@ class ESP32Bridge(Node):
         self.declare_parameter('publish_tf', False)
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_footprint')
-        self.declare_parameter('min_moving_rpm', 24.0)  # Sàn RPM tối thiểu khi lăn bánh để thắng ma sát tải nặng
-        self.declare_parameter('rpm_scale', 1.25)       # Hệ số bù lực kéo tải nặng (+25%)
+        self.declare_parameter('min_moving_rpm', 6.5)   # Sàn RPM tối thiểu khi lăn bánh (0.06 m/s) để thắng ma sát đất gồ ghề
+        self.declare_parameter('rpm_scale', 1.18)       # Hệ số bù lực kéo tải nặng (+18% bù trượt đất)
         self.declare_parameter('encoder_sign', -1.0)    # -1.0: Đảo dấu xung encoder chuẩn xác với chiều tiến thực tế
 
         self.mode = self.get_parameter('connection_mode').value
@@ -201,9 +201,19 @@ class ESP32Bridge(Node):
                     v_left += shift
                     v_right += shift
 
-            # Đổi m/s -> RPM chính xác: 0.10 m/s -> ~9.55 RPM (ESP32 đã có sàn 55 PWM lo mô-men xoắn)
-            rpm_l = (v_left * 60.0) / self.wheel_circ
-            rpm_r = (v_right * 60.0) / self.wheel_circ
+            # Đổi m/s -> RPM chính xác kèm bù lực kéo tải nặng / trượt đất (rpm_scale):
+            rpm_scale_eff = getattr(self, 'rpm_scale', 1.18)
+            rpm_l = ((v_left * 60.0) / self.wheel_circ) * rpm_scale_eff
+            rpm_r = ((v_right * 60.0) / self.wheel_circ) * rpm_scale_eff
+
+            # Đảm bảo sàn RPM tối thiểu khi lăn bánh để thắng ma sát tĩnh đất gồ ghề
+            # Giữ cho động cơ luôn đủ mô-men xoắn vượt gờ đất và encoder thu đủ xung ổn định (>85 pulses/s)
+            min_rpm = float(getattr(self, 'min_moving_rpm', 6.5))
+            if abs(v) > 0.01:
+                sign_l = 1.0 if rpm_l >= 0 else -1.0
+                sign_r = 1.0 if rpm_r >= 0 else -1.0
+                rpm_l = sign_l * max(min_rpm, abs(rpm_l))
+                rpm_r = sign_r * max(min_rpm, abs(rpm_r))
 
             self.target_rpm_left = rpm_l
             self.target_rpm_right = rpm_r
