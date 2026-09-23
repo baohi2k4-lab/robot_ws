@@ -53,7 +53,7 @@ cnn_driver_node:
     max_row_length: 10.0          # m — giới hạn an toàn tối đa
 
     # ── Điều Phối Nhiệm Vụ 2 Luống Thực Nghiệm (3 hàng thùng, 2 luống) ──
-    wait_for_rviz_start: true      # Khi bật node, xe đứng yên chờ lệnh từ RViz (2D Goal Pose) mới chạy
+    wait_for_rviz_start: false     # Tự động xuất phát ngay khi bật node (không cần bấm 2D Goal Pose hoặc bat-xe)
     enable_mission_goals: true      # Giám sát 4 điểm mốc (Start -> Goal 1 -> Goal 2 -> Goal 3)
     enable_global_plan_assist: true # Hỗ trợ song song cùng CNN giữ đúng tim luống
     field_length: 3.0              # m — Chiều dài mỗi luống (3.0m)

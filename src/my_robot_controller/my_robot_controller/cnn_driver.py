@@ -113,7 +113,7 @@ class CnnDriverNode(Node):
         self.declare_parameter('omega_r1', 0.85)
         self.declare_parameter('omega_clearance', 0.55)
         self.declare_parameter('omega_lead_in', 0.50)
-        self.declare_parameter('wait_for_rviz_start', True)
+        self.declare_parameter('wait_for_rviz_start', False)
 
         p = self.get_parameter
         self.model_path               = p('model_path').value
