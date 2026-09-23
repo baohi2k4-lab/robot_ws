@@ -16,8 +16,15 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
 WS_DIR="$(dirname "$SCRIPT_DIR")"
 
 PI_USER="bao"
-PI_DEFAULT_IP="10.10.178.200"
-PI_IP="${1:-$PI_DEFAULT_IP}"
+if [ -n "$1" ]; then
+    PI_IP="$1"
+elif ping -c 1 -W 1 192.168.10.2 >/dev/null 2>&1; then
+    PI_IP="192.168.10.2"
+elif ping -c 1 -W 1 10.10.178.200 >/dev/null 2>&1; then
+    PI_IP="10.10.178.200"
+else
+    PI_IP="192.168.10.2"
+fi
 
 echo "📡 ============================================================"
 echo "🚀 ĐỒNG BỘ MÃ NGUỒN PC ➔ RASPBERRY PI"
