@@ -26,18 +26,18 @@ cnn_driver_node:
     linear_speed: 0.06
     turn_linear_speed: 0.00           # Dừng hẳn khi xoay nắn góc (không vừa xoay vừa lết tới, tránh đâm gốc cây)
     turn_angular_speed: 0.65          # rad/s — Vận tốc góc xoay căn chỉnh (mô-men xoắn mạnh mẽ bứt phá ma sát đất gồ ghề)
-    turn_in_place_threshold_deg: 1.2  # Ngưỡng dừng xoay tại chỗ: lệch > 1.2° là dừng nắn góc dứt khoát
-    turn_in_place_resume_deg: 0.6     # Ngưỡng xong việc xoay: góc thẳng <= 0.6° mới cho chạy thẳng tiếp
+    turn_in_place_threshold_deg: 14.0 # Ngưỡng dừng xoay tại chỗ: xe luôn VỪA CHẠY VỪA UỐN LƯỢN MƯỢT MÀ, chỉ dừng khi lệch cực lớn (> 14°)
+    turn_in_place_resume_deg: 5.0     # Ngưỡng xong việc xoay: góc lệch <= 5.0° là lập tức tiếp tục chạy tiến
 
-    # Bộ điều khiển trượt SMC bám luống với lực bẻ lái mạnh mẽ, dứt khoát
-    lambda_smc: 2.5             # hệ số bề mặt trượt S = de + lambda * e
-    k_smc: 4.2                  # hệ số hồi tiếp mô-men quay dứt khoát
-    eta_smc: 0.8                # hệ số chuyển mạch triệt tiêu nhanh sai số
-    phi_smc: 0.4                # lớp biên chống rung chattering
+    # Bộ điều khiển trượt SMC bám luống với lực bẻ lái êm dịu, không giật cục (Phong cách A)
+    lambda_smc: 2.0             # hệ số bề mặt trượt S = de + lambda * e (làm trơn phản ứng)
+    k_smc: 2.8                  # hệ số hồi tiếp mô-men quay êm ái, bẻ lái mượt mà về tim hàng
+    eta_smc: 0.25               # hệ số chuyển mạch mềm (chống rung chattering vi sai)
+    phi_smc: 0.50               # bề dày lớp biên trượt làm trơn điều khiển
 
-    kp: 1.5                     # có thể cần giảm xuống nếu xe dao động
-    max_steering_angle_deg: 14.0 # góc bẻ lái tối đa nâng lên 14.0 độ giúp xe bẻ lái dứt khoát về giữa hàng
-    ema_alpha: 0.35             # tăng nhẹ độ nhạy EMA phản xạ bẻ lái
+    kp: 1.5                     # hệ số tỷ lệ
+    max_steering_angle_deg: 15.0 # góc bẻ lái tối đa 15.0 độ giúp xe uốn cong mượt mà về giữa hàng
+    ema_alpha: 0.35             # bộ lọc trung bình động EMA mượt mà
 
     # Khoảng cách giữa 2 hàng luống thực tế (m)
     row_spacing: 1.20           # Hàng cách hàng 1.20m (chuẩn 3 hàng cây bắp / 2 luống)
