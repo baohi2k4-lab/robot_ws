@@ -194,7 +194,7 @@ class ESP32Bridge(Node):
             # Khi xe đang có lệnh tiến (v > 0.03 m/s), cả 2 bánh luôn quay tiến để duy trì lực kéo ổn định,
             # tránh giật lùi bánh trong làm mất lực hoặc khựng xe trên nền đất/cỏ.
             if v > 0.03:
-                min_fwd = 0.035
+                min_fwd = min(0.020, v * 0.35)
                 min_v = min(v_left, v_right)
                 if min_v < min_fwd:
                     shift = min_fwd - min_v

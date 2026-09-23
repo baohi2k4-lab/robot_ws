@@ -22,8 +22,8 @@ cnn_driver_node:
 
     mask_threshold: 0.35        # cao hơn sim vì model nhận diện ảnh thật tốt hơn
 
-    # Tốc độ di chuyển (m/s) — Chạy chậm đầm xe (7.5 cm/s), chống trượt bánh và bảo vệ IMU trên đất gồ ghề
-    linear_speed: 0.075
+    # Tốc độ di chuyển (m/s) — Chạy 0.06 m/s (6 cm/s) ổn định nhận diện cảm biến & camera D435
+    linear_speed: 0.06
     turn_linear_speed: 0.00           # Dừng hẳn khi xoay nắn góc (không vừa xoay vừa lết tới, tránh đâm gốc cây)
     turn_angular_speed: 0.65          # rad/s — Vận tốc góc xoay căn chỉnh (mô-men xoắn mạnh mẽ bứt phá ma sát đất gồ ghề)
     turn_in_place_threshold_deg: 1.2  # Ngưỡng dừng xoay tại chỗ: lệch > 1.2° là dừng nắn góc dứt khoát
