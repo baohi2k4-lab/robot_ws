@@ -785,7 +785,10 @@ update_cyclone_peers() {
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain>
     <General>
-      <AllowMulticast>false</AllowMulticast>
+      <Interfaces>
+        <NetworkInterface address="${my_ip}" />
+      </Interfaces>
+      <AllowMulticast>true</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
     </General>
     <Discovery>
@@ -794,12 +797,15 @@ update_cyclone_peers() {
       <Peers>
         <Peer address="${pi_ip}"/>
         <Peer address="${my_ip}"/>
+        <Peer address="192.168.10.2"/>
+        <Peer address="192.168.10.1"/>
       </Peers>
     </Discovery>
   </Domain>
 </CycloneDDS>
 XMLEOF
-    echo "✅ Đã cập nhật cyclonedds.xml: Pi=$pi_ip, PC=$my_ip (unicast, tắt multicast)"
+    cp -f "$WS_DIR/cyclonedds.xml" "$HOME/.cyclonedds.xml" 2>/dev/null || true
+    echo "✅ Đã cập nhật cyclonedds.xml: Pi=$pi_ip, PC=$my_ip (đã gán đúng IP card mạng)"
 }
 
 # Khôi phục CycloneDDS về multicast (dùng trên mạng trường)
@@ -1214,3 +1220,7 @@ alias huy="cancel_nav_func"
 alias huy-nav="cancel_nav_func"
 alias stop-nav="cancel_nav_func"
 alias cancel-nav="cancel_nav_func"
+
+# Tự động nạp môi trường workspace ngay khi mở terminal
+load_ws
+
