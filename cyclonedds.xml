@@ -2,7 +2,7 @@
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain>
     <General>
-      <AllowMulticast>true</AllowMulticast>
+      <AllowMulticast>false</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
     </General>
     <Discovery>
