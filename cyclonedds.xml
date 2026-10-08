@@ -2,7 +2,10 @@
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain>
     <General>
-      <NetworkInterfaceAddress>wlp0s20f3</NetworkInterfaceAddress>
+      <Interfaces>
+        <NetworkInterface name="wlp0s20f3" priority="default" multicast="false"/>
+        <NetworkInterface name="wlan0" priority="default" multicast="false"/>
+      </Interfaces>
       <AllowMulticast>false</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
     </General>
