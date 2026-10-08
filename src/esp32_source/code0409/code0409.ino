@@ -30,7 +30,7 @@
 #define DERIVATIVE_FILTER       0.6f      // Hệ số lọc thông thấp cho khâu vi phân PID
 #define EMA_LOW_SPEED_ALPHA     0.70f     // Phản hồi tốc độ tức thời (<40 RPM), không gây trễ vòng lặp PID
 #define EMA_HIGH_SPEED_ALPHA    0.80f     // EMA tốc độ cao (phản hồi nhanh)
-#define PID_ERROR_DEADBAND      0.5f      // Vùng chết sai số PID hợp lý
+#define PID_ERROR_DEADBAND      0.3f      // Vùng chết sai số PID chuẩn cho tốc độ chậm (0.06 m/s)
 
 // Giám sát an toàn & Kẹt bánh (Stall Detection)
 #define STALL_DETECT_MS         1200      // Cho phép 1.2s mô-men xoắn cực đại trước khi cảnh báo
@@ -432,10 +432,26 @@ void updatePID(float dt) {
       continue;
     }
 
-    // 1. Feedforward có bù ma sát tĩnh (Deadband Friction Offset) cho đất gồ ghề
-    // Cung cấp mức sàn 55 PWM (hoặc 70 PWM khi xoay tại chỗ) + thành phần tuyến tính cho tải nặng
+    // 1. Feedforward có bù ma sát tĩnh thích ứng (Adaptive Friction Compensation)
+    // - Khi xoay tại chỗ (Pivot Turn): sàn 45 PWM (min_floor 36) đủ mô-men xoay đầm chắc
+    // - Khi bò chậm (target <= 8.5 RPM ~ 0.06 - 0.08 m/s): hạ sàn về 22-30 PWM để chạy đúng 0.06 m/s
+    // - Khi chạy nhanh: nâng sàn tuyến tính
     bool isPivotTurn = (rosTargetRpmSigned[0] * rosTargetRpmSigned[2] < -0.01f);
-    float base_floor = isPivotTurn ? 70.0f : 55.0f;
+    float base_floor;
+    int   min_floor;
+    if (isPivotTurn) {
+      base_floor = 45.0f;
+      min_floor  = 36;
+    } else {
+      if (target <= 8.5f) {
+        // Dải bò chậm 0.06 m/s (~5.7 RPM)
+        base_floor = 22.0f + (target / 8.5f) * 8.0f; // 22.0 -> 30.0 PWM
+        min_floor  = 20;
+      } else {
+        base_floor = 30.0f + ((target - 8.5f) / 211.5f) * 25.0f; // 30 -> 55 PWM
+        min_floor  = 26;
+      }
+    }
     float ff_pwm = base_floor + (target / 220.0f) * (255.0f - base_floor);
 
     // 2. Sai số bám tốc độ mục tiêu độc lập cho từng bánh
@@ -444,24 +460,27 @@ void updatePID(float dt) {
       track_error = 0.0f;
     }
 
-    // 3. Khâu tích phân (Integral) có Anti-Windup (bơm thêm lực khi tải nặng bị ỳ)
-    // Tăng giới hạn tích phân để PID tự vượt ma sát tĩnh một cách tự nhiên
-    wpid[i].integral = constrain(wpid[i].integral + track_error * dt, -140.0f, 140.0f);
+    // 3. Khâu tích phân (Integral) có Anti-Windup & Tự động bơm lực khi gặp đất gồ ghề
+    // Khi chạy chậm (target <= 8.5 RPM), sai số tuyệt đối nhỏ nhưng xe cần mô-men lớn để trèo gờ đất:
+    float eff_error = track_error;
+    if (target <= 8.5f && track_error > 0.0f) {
+      // Bánh đang quay chậm hơn lệnh (bị cản bởi mô đất/gờ rãnh) -> khuếch đại sai số để tích phân bơm lực nhanh
+      eff_error *= 2.5f;
+    }
+    wpid[i].integral = constrain(wpid[i].integral + eff_error * dt, -140.0f, 140.0f);
 
     // 4. Khâu vi phân (Derivative) có lọc nhiễu tần số cao
     float rawDeriv = (track_error - wpid[i].lastError) / dt;
     wpid[i].filteredDeriv = DERIVATIVE_FILTER * rawDeriv + (1.0f - DERIVATIVE_FILTER) * wpid[i].filteredDeriv;
     wpid[i].lastError = track_error;
 
-    // 5. Tính toán PID cơ sở
-    float pid_corr = (wpid[i].kp * track_error) + (wpid[i].ki * wpid[i].integral) + (wpid[i].kd * wpid[i].filteredDeriv);
+    // 5. Tính toán PID cơ sở (sử dụng eff_error để bơm lực tức thì khi kẹt dốc)
+    float pid_corr = (wpid[i].kp * eff_error) + (wpid[i].ki * wpid[i].integral) + (wpid[i].kd * wpid[i].filteredDeriv);
 
     // 6. Tổng hợp PWM điều khiển hoàn chỉnh (0-255)
-    // Loại bỏ hoàn toàn các khâu giằng co và ghì phanh phi tuyến gây giật cục
     int desired = constrain((int)(ff_pwm + pid_corr), 0, 255);
 
     // Sàn PWM tối thiểu để động cơ 775 duy trì lăn bánh khỏe khoắn trên đất gồ ghề
-    int min_floor = isPivotTurn ? 60 : 45;
     if (target > 1.0f && desired < min_floor) {
       desired = min_floor;
     }

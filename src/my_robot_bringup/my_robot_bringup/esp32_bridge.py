@@ -44,8 +44,8 @@ class ESP32Bridge(Node):
         self.declare_parameter('publish_tf', False)
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_footprint')
-        self.declare_parameter('min_moving_rpm', 6.5)   # Sàn RPM tối thiểu khi lăn bánh (0.06 m/s) để thắng ma sát đất gồ ghề
-        self.declare_parameter('rpm_scale', 1.18)       # Hệ số bù lực kéo tải nặng (+18% bù trượt đất)
+        self.declare_parameter('min_moving_rpm', 5.0)   # Sàn RPM tối thiểu khi lăn bánh (~0.052 m/s)
+        self.declare_parameter('rpm_scale', 1.05)       # Hệ số bù lực kéo tải nặng (+5% bù trượt đất)
         self.declare_parameter('encoder_sign', -1.0)    # -1.0: Đảo dấu xung encoder chuẩn xác với chiều tiến thực tế
         self.declare_parameter('cmd_vel_timeout', 1.0)  # s — Mất /cmd_vel quá thời gian này (rớt WiFi, laptop treo) -> tự dừng xe
 
@@ -221,13 +221,13 @@ class ESP32Bridge(Node):
                     v_right += shift
 
             # Đổi m/s -> RPM chính xác kèm bù lực kéo tải nặng / trượt đất (rpm_scale):
-            rpm_scale_eff = getattr(self, 'rpm_scale', 1.18)
+            rpm_scale_eff = getattr(self, 'rpm_scale', 1.05)
             rpm_l = ((v_left * 60.0) / self.wheel_circ) * rpm_scale_eff
             rpm_r = ((v_right * 60.0) / self.wheel_circ) * rpm_scale_eff
 
             # Đảm bảo sàn RPM tối thiểu khi lăn bánh để thắng ma sát tĩnh đất gồ ghề
             # nhưng BẢO TOÀN 100% LỰC BẺ LÁI VI SAI (Differential Steering Torque):
-            min_rpm = float(getattr(self, 'min_moving_rpm', 6.5))
+            min_rpm = float(getattr(self, 'min_moving_rpm', 5.0))
             if abs(v) > 0.01:
                 avg_rpm = (rpm_l + rpm_r) / 2.0
                 diff_rpm = (rpm_r - rpm_l) / 2.0  # Chênh lệch vi sai quyết định góc bẻ lái

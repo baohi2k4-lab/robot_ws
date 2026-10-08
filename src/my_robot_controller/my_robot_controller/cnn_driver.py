@@ -1365,14 +1365,14 @@ class CnnDriverNode(Node):
 
         # Tăng tốc mềm với mô-men khởi động tức thì (tối thiểu 80% để bứt phá ma sát tĩnh trên đất gồ ghề)
         ramp = min(1.0, 0.80 + 0.20 * (elapsed / 0.15))
-        base_w = float(getattr(self, 'turn_angular_speed', 0.65))
+        base_w = float(getattr(self, 'turn_angular_speed', 0.28))
         
-        # Đảm bảo sàn tốc độ >= 0.42 rad/s để 4 động cơ 775 xoay khỏe khoắn trên đất gồ ghề, không bị khựng
+        # Điều phối tốc độ góc theo độ lệch góc thực tế (nhỏ dần khi gần thẳng hàng)
         angle_err = abs(self.smoothed_angle_deg)
         if angle_err < 0.8:
-            target_w = max(0.42, 0.65 * base_w)
+            target_w = max(0.18, 0.65 * base_w)
         elif angle_err < 1.4:
-            target_w = max(0.52, 0.80 * base_w)
+            target_w = max(0.22, 0.80 * base_w)
         else:
             target_w = base_w
 
