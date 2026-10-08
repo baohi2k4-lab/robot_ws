@@ -2,6 +2,7 @@
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain>
     <General>
+      <NetworkInterfaceAddress>wlp0s20f3</NetworkInterfaceAddress>
       <AllowMulticast>false</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
     </General>
