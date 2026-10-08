@@ -259,7 +259,7 @@ def generate_launch_description():
             'i2c_bus': 1,
             'i2c_address': 0x68,
             'frame_id': 'imu_link',
-            'publish_topic': PythonExpression(["'/imu/data_complementary' if '", LaunchConfiguration('enable_madgwick'), "' == 'true' else '/imu/data'"]),
+            'publish_topic': '/imu/data',
             'raw_topic': '/imu/data_raw',
             'rate_hz': 50.0,
             # Cấu hình lọc rung động cơ 775 + hộp số và bù trôi Zero-bias (ZUPT)
