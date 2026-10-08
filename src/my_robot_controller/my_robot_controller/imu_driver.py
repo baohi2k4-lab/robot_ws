@@ -363,9 +363,19 @@ class ImuDriverNode(Node):
             self.filt_gy = self.gyro_ema_alpha * self.filt_gy + (1.0 - self.gyro_ema_alpha) * gy_corr
             self.filt_gz = self.gyro_ema_alpha * self.filt_gz + (1.0 - self.gyro_ema_alpha) * gz_corr
 
+            # Triệt tiêu nhiễu tĩnh MEMS khi xe dừng đỗ (Deadband 0.015 rad/s ~ 0.85 deg/s)
+            if self.is_stationary and (now - self.stationary_start_time) > 0.5:
+                if abs(self.filt_gx) < 0.015: self.filt_gx = 0.0
+                if abs(self.filt_gy) < 0.015: self.filt_gy = 0.0
+                if abs(self.filt_gz) < 0.015: self.filt_gz = 0.0
+
             out_ax, out_ay, out_az = self.filt_ax, self.filt_ay, self.filt_az
             out_gx, out_gy, out_gz = self.filt_gx, self.filt_gy, self.filt_gz
         else:
+            if self.is_stationary and (now - self.stationary_start_time) > 0.5:
+                if abs(gx_corr) < 0.015: gx_corr = 0.0
+                if abs(gy_corr) < 0.015: gy_corr = 0.0
+                if abs(gz_corr) < 0.015: gz_corr = 0.0
             out_ax, out_ay, out_az = ax, ay, az
             out_gx, out_gy, out_gz = gx_corr, gy_corr, gz_corr
 
