@@ -76,11 +76,14 @@ class PerceptionManager:
     """
     Manages and fuses feeds from Camera/CNN and Lidar using SensorPriorityManager.
     """
-    def __init__(self, inference_handler=None, lidar_processor=None, eor_detector=None):
+    def __init__(self, inference_handler=None, lidar_processor=None, eor_detector=None,
+                 front_stop_dist=0.22, side_danger_dist=0.42):
         self.inference = inference_handler
         self.lidar = lidar_processor
         self.eor_detector = eor_detector if eor_detector is not None else EndOfRowDetector()
         self.sensor_priority = SensorPriorityManager()
+        self.front_stop_dist = float(front_stop_dist)    # m — vật cản trước mũi -> obstacle_detected
+        self.side_danger_dist = float(side_danger_dist)  # m — ngưỡng kích hoạt Virtual Repulsion sườn
 
     def process_sensors(self, cv_image, distance_traveled, rx=0.0, ry=0.0, ryaw=0.0, max_angle_deg=3.5, inside_row=True, external_cnn=None):
         """
@@ -113,45 +116,65 @@ class PerceptionManager:
         obstacles = []
         
         if self.lidar is not None:
+            # 1. Đo khoảng cách trực diện mũi xe (-25° đến 25°)
             front_min_dist = self.lidar.get_min_range_in_sector(-25.0, 25.0)
-            left_side_dist = self.lidar.get_min_range_in_sector(20.0, 85.0)
-            right_side_dist = self.lidar.get_min_range_in_sector(-85.0, -20.0)
+            
+            # 2. Quét bao quát toàn bộ sườn trái (20° đến 110°) từ cản trước đến bánh sau
+            left_side_dist = min(
+                self.lidar.get_min_range_in_sector(20.0, 70.0),
+                self.lidar.get_min_range_in_sector(70.0, 110.0)
+            )
+            # 3. Quét bao quát toàn bộ sườn phải (-110° đến -20°) từ cản trước đến bánh sau
+            right_side_dist = min(
+                self.lidar.get_min_range_in_sector(-70.0, -20.0),
+                self.lidar.get_min_range_in_sector(-110.0, -70.0)
+            )
             rear_left_dist = self.lidar.get_min_range_in_sector(70.0, 135.0)
             rear_right_dist = self.lidar.get_min_range_in_sector(-135.0, -70.0)
             obstacles = self.lidar.get_obstacles_global(rx, ry, ryaw)
             
-            # Khi Camera/CNN nhìn thấy hàng (confidence >= 0.30):
-            # Xe đang bám tim hàng do CNN dẫn đường. Cây/thùng ở đầu hàng hoặc dọc 2 bên luống
-            # KHÔNG được coi là vật cản làm đứng xe! Chỉ coi là vật cản nếu sát mũi xe (< 0.16m).
-            if confidence >= 0.30:
-                obstacle_detected = (front_min_dist < 0.16)
-            else:
+            # Cảnh báo phanh khẩn cấp nếu có vật cản cứng ngay trước cản xe (< front_stop_dist)
+            # (Khoảng cách sườn được xử lý bằng tầng né sườn khẩn cấp Virtual Repulsion & giảm tốc, tránh dừng cứng gây kẹt xe)
+            obstacle_detected = (front_min_dist < self.front_stop_dist)
+            if not obstacle_detected and confidence < 0.30:
                 obstacle_detected = self.lidar.check_obstacle_in_front(rx, ry, ryaw, inside_row=inside_row)
 
-        # 3. Điều hướng: Tin tưởng 100% Camera/CNN khi nhìn thấy hàng (confidence >= 0.30)
-        # Cho phép xe bám vào hàng từ xa hoặc khi tiếp cận xéo góc mà không bị LiDAR đánh lái ngược.
-        if confidence >= 0.30:
-            # Camera đã thấy hàng rõ ràng -> Giữ nguyên 100% góc lái CNN để dẫn xe thẳng vào tim hàng
-            pass
-        elif self.lidar is not None:
-            # Khi Camera tạm thời mất dấu (confidence < 0.30), dùng LiDAR 2 bên thành hàng làm trợ lái dự phòng
-            if (0.15 < left_side_dist < 0.85) and (0.15 < right_side_dist < 0.85):
+        # 3. ĐIỀU HƯỚNG DUNG HỢP (CAMERA CNN DẪN ĐƯỜNG XA + LIDAR LÁ CHẮN AN TOÀN VẬT LÝ):
+        # Bán bề rộng xe đến mép bánh ngoài = 0.34m. Lối luống rộng 1.20m (tâm xe cách mép 0.60m).
+        if self.lidar is not None:
+            # 3.1. HỖ TRỢ ĐỊNH TÂM LIÊN TỤC BẰNG LIDAR (LiDAR Active Centering Assist)
+            # Khi cả 2 bên thành hàng đều nằm trong tầm quét hợp lý (0.20m - 1.10m):
+            if (0.20 < left_side_dist < 1.10) and (0.20 < right_side_dist < 1.10):
                 corridor_width = left_side_dist + right_side_dist
-                if 0.70 <= corridor_width <= 1.50:
-                    delta_side = right_side_dist - left_side_dist
-                    lidar_centering_bias = float(np.clip((delta_side / 0.20) * (max_angle_deg * 0.7), -max_angle_deg * 0.7, max_angle_deg * 0.7))
-                    heading_error = lidar_centering_bias
+                if 0.70 <= corridor_width <= 1.60:
+                    delta_side = right_side_dist - left_side_dist  # >0: gần hàng trái hơn -> cần bẻ Phải
+                    # Mỗi 10cm lệch sườn tạo lực bẻ lái ~3.5° về tim luống
+                    lidar_centering_bias = float(np.clip((delta_side / 0.20) * 7.0, -8.0, 8.0))
+                    
+                    if confidence >= 0.30:
+                        # Dung hợp cùng CNN: giữ định hướng dài hạn của CNN kết hợp kéo tâm vật lý của LiDAR
+                        heading_error = float(np.clip(heading_error + lidar_centering_bias, -max_angle_deg, max_angle_deg))
+                    else:
+                        # Khi camera mất dấu / mờ: LiDAR đảm nhận toàn quyền định tâm
+                        heading_error = lidar_centering_bias
 
-            # Thoát hiểm khẩn cấp khi xe sắp va quẹt sát sườn (< 15cm) và camera không thấy hàng
-            danger_threshold = 0.15
+            # 3.2. VÙNG ĐỆM AN TOÀN SƯỜN KHẨN CẤP (Emergency Virtual Repulsion - BẤT KỂ CAMERA)
+            # Kích hoạt BẤT KỂ CAMERA ĐANG BÁO GÌ khi sườn xe tiến quá sát hàng (< side_danger_dist, mặc định 0.42m: mép bánh cách hàng < 8cm)
+            danger_threshold = self.side_danger_dist
+
             if left_side_dist < danger_threshold:
                 penetration = danger_threshold - left_side_dist
-                repulsion_deg = float(np.clip((penetration / 0.05) * max_angle_deg, 2.0, max_angle_deg))
-                heading_error = max(heading_error, repulsion_deg)
+                # Lực đẩy mạnh mẽ tỷ lệ theo độ lấn ranh giới (ít nhất 4.0°, tối đa max_angle_deg)
+                repulsion_deg = float(np.clip((penetration / 0.08) * max_angle_deg + 4.0, 4.0, max_angle_deg))
+                # Bắt buộc bẻ lái sang Phải (dương) để cứu sườn trái
+                heading_error = min(max(heading_error + repulsion_deg, repulsion_deg), max_angle_deg)
+                
             elif right_side_dist < danger_threshold:
                 penetration = danger_threshold - right_side_dist
-                repulsion_deg = float(np.clip((penetration / 0.05) * max_angle_deg, 2.0, max_angle_deg))
-                heading_error = min(heading_error, -repulsion_deg)
+                # Lực đẩy mạnh mẽ tỷ lệ theo độ lấn ranh giới (âm để bẻ Trái)
+                repulsion_deg = float(np.clip((penetration / 0.08) * max_angle_deg + 4.0, 4.0, max_angle_deg))
+                # Bắt buộc bẻ lái sang Trái (âm) để cứu sườn phải
+                heading_error = max(min(heading_error - repulsion_deg, -repulsion_deg), -max_angle_deg)
 
         # 4. Xác định cảm biến đang chiếm quyền điều khiển
         active_sensor = self.sensor_priority.select_active_tracking_sensor(

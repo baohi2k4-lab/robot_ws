@@ -18,7 +18,6 @@ from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String as StringMsg
 import tf2_ros
-import numpy as np
 
 try:
     import serial
@@ -48,6 +47,7 @@ class ESP32Bridge(Node):
         self.declare_parameter('min_moving_rpm', 6.5)   # Sàn RPM tối thiểu khi lăn bánh (0.06 m/s) để thắng ma sát đất gồ ghề
         self.declare_parameter('rpm_scale', 1.18)       # Hệ số bù lực kéo tải nặng (+18% bù trượt đất)
         self.declare_parameter('encoder_sign', -1.0)    # -1.0: Đảo dấu xung encoder chuẩn xác với chiều tiến thực tế
+        self.declare_parameter('cmd_vel_timeout', 1.0)  # s — Mất /cmd_vel quá thời gian này (rớt WiFi, laptop treo) -> tự dừng xe
 
         self.mode = self.get_parameter('connection_mode').value
         self.port = self.get_parameter('serial_port').value
@@ -62,6 +62,7 @@ class ESP32Bridge(Node):
         self.min_moving_rpm = float(self.get_parameter('min_moving_rpm').value)
         self.rpm_scale = float(self.get_parameter('rpm_scale').value)
         self.encoder_sign = float(self.get_parameter('encoder_sign').value)
+        self.cmd_vel_timeout = float(self.get_parameter('cmd_vel_timeout').value)
         
         raw_pub_tf = self.get_parameter('publish_tf').value
         if isinstance(raw_pub_tf, str):
@@ -92,6 +93,8 @@ class ESP32Bridge(Node):
         self._cmd_v = 0.0
         self._cmd_w = 0.0
         self.last_time = self.get_clock().now()
+        self._last_cmd_time = None          # Thời điểm nhận /cmd_vel gần nhất (watchdog mạng)
+        self._cmd_timeout_active = False    # Đã kích hoạt dừng do mất lệnh hay chưa
 
         # ── Publishers & Subscribers ──────────────────────────────────
         self.cmd_sub = self.create_subscription(
@@ -165,6 +168,10 @@ class ESP32Bridge(Node):
         """
         self._cmd_v = msg.linear.x
         self._cmd_w = msg.angular.z
+        self._last_cmd_time = self.get_clock().now()
+        if self._cmd_timeout_active:
+            self._cmd_timeout_active = False
+            self.get_logger().info('✅ [CMD_VEL WATCHDOG] Đã nhận lại lệnh /cmd_vel -> tiếp tục điều khiển.')
         # Chỉ cập nhật vx/vth trực tiếp từ cmd_vel khi chạy chế độ MOCK (không có phần cứng)
         if self.mode != 'serial':
             self.vx = msg.linear.x
@@ -177,6 +184,18 @@ class ESP32Bridge(Node):
 
         if dt <= 0:
             return
+
+        # ── WATCHDOG MẠNG: mất /cmd_vel (rớt WiFi, laptop treo, CNN crash) -> dừng xe êm ──
+        if self._last_cmd_time is not None and self.cmd_vel_timeout > 0.0:
+            silence = (now - self._last_cmd_time).nanoseconds / 1e9
+            if silence > self.cmd_vel_timeout:
+                if not self._cmd_timeout_active:
+                    self._cmd_timeout_active = True
+                    self.get_logger().warn(
+                        f'🛑 [CMD_VEL WATCHDOG] Mất lệnh /cmd_vel {silence:.2f}s > {self.cmd_vel_timeout:.2f}s '
+                        f'(rớt mạng / laptop treo?) -> Dừng xe an toàn!')
+                self._cmd_v = 0.0
+                self._cmd_w = 0.0
 
         # ── TÍNH TOÁN RPM TRỢ LỰC KÉO TẢI NẶNG (KICKSTART + CLOSED-LOOP TRIM) ──
         v = self._cmd_v
@@ -207,13 +226,17 @@ class ESP32Bridge(Node):
             rpm_r = ((v_right * 60.0) / self.wheel_circ) * rpm_scale_eff
 
             # Đảm bảo sàn RPM tối thiểu khi lăn bánh để thắng ma sát tĩnh đất gồ ghề
-            # Giữ cho động cơ luôn đủ mô-men xoắn vượt gờ đất và encoder thu đủ xung ổn định (>85 pulses/s)
+            # nhưng BẢO TOÀN 100% LỰC BẺ LÁI VI SAI (Differential Steering Torque):
             min_rpm = float(getattr(self, 'min_moving_rpm', 6.5))
             if abs(v) > 0.01:
-                sign_l = 1.0 if rpm_l >= 0 else -1.0
-                sign_r = 1.0 if rpm_r >= 0 else -1.0
-                rpm_l = sign_l * max(min_rpm, abs(rpm_l))
-                rpm_r = sign_r * max(min_rpm, abs(rpm_r))
+                avg_rpm = (rpm_l + rpm_r) / 2.0
+                diff_rpm = (rpm_r - rpm_l) / 2.0  # Chênh lệch vi sai quyết định góc bẻ lái
+                
+                sign_fwd = 1.0 if avg_rpm >= 0 else -1.0
+                eff_fwd = sign_fwd * max(min_rpm, abs(avg_rpm))
+                
+                rpm_l = eff_fwd - diff_rpm
+                rpm_r = eff_fwd + diff_rpm
 
             self.target_rpm_left = rpm_l
             self.target_rpm_right = rpm_r

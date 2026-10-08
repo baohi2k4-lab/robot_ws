@@ -39,6 +39,21 @@ cnn_driver_node:
     max_steering_angle_deg: 15.0 # góc bẻ lái tối đa 15.0 độ giúp xe uốn cong mượt mà về giữa hàng
     ema_alpha: 0.35             # bộ lọc trung bình động EMA mượt mà
 
+    # ── Lá Chắn An Toàn & Định Tâm Sườn Vật Lý Bằng LiDAR C1 (LiDAR Active Guard) ──
+    # Khoảng cách đo từ tâm LiDAR. Ngưỡng sườn luôn phải > robot_half_width (node tự nâng nếu đặt sai).
+    # • Định tâm liên tục (Active Centering): Tự động bù góc lái kéo xe về tim luống khi lệch ngang
+    # • Sườn < side_near_dist: Virtual Repulsion bẻ lái thoát + tăng độ nhạy lái
+    # • Sườn < side_critical_dist: giảm 50% tốc độ tiến
+    # • Sườn < side_emergency_dist: bò chậm (side_emergency_speed_ratio) + lái gắt, KHÔNG xoay tại chỗ
+    # • Mũi < front_stop_dist: dừng chờ thoáng | Mũi < lidar_estop_dist: phanh phản xạ 15Hz
+    robot_half_width: 0.34            # m — tâm xe tới mép bánh ngoài
+    front_stop_dist: 0.22             # m
+    lidar_estop_dist: 0.20            # m (phải <= front_stop_dist)
+    side_near_dist: 0.42              # m — mép bánh cách hàng 8cm
+    side_critical_dist: 0.39          # m — mép bánh cách hàng 5cm
+    side_emergency_dist: 0.36         # m — mép bánh cách hàng 2cm
+    side_emergency_speed_ratio: 0.40  # × linear_speed khi tới hạn
+
     # Khoảng cách giữa 2 hàng luống thực tế (m)
     row_spacing: 1.20           # Hàng cách hàng 1.20m (chuẩn 3 hàng cây bắp / 2 luống)
     min_row_length: 1.5         # m — cự ly tối thiểu bắt buộc chạy trong hàng trước khi cho phép nhận biết hết luống

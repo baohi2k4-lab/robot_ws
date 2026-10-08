@@ -115,6 +115,15 @@ class CnnDriverNode(Node):
         self.declare_parameter('omega_lead_in', 0.50)
         self.declare_parameter('wait_for_rviz_start', False)
 
+        # ── Ngưỡng an toàn LiDAR (đo từ tâm LiDAR, m) ──
+        self.declare_parameter('robot_half_width', 0.34)      # Nửa bề rộng xe tới mép bánh ngoài
+        self.declare_parameter('front_stop_dist', 0.22)       # Dừng khi vật cản trước mũi < ngưỡng
+        self.declare_parameter('lidar_estop_dist', 0.20)      # Phanh phản xạ 15Hz trong scan_callback
+        self.declare_parameter('side_near_dist', 0.42)        # Sát sườn: tăng độ nhạy lái + repulsion
+        self.declare_parameter('side_critical_dist', 0.39)    # Rất sát: giảm 50% tốc độ
+        self.declare_parameter('side_emergency_dist', 0.36)   # Tới hạn: bò chậm + lái gắt thoát sườn
+        self.declare_parameter('side_emergency_speed_ratio', 0.40)  # Tỉ lệ linear_speed khi tới hạn
+
         p = self.get_parameter
         self.model_path               = p('model_path').value
         self.input_height             = p('input_height').value
@@ -178,6 +187,15 @@ class CnnDriverNode(Node):
         self.omega_clearance          = p('omega_clearance').value
         self.omega_lead_in            = p('omega_lead_in').value
         self.wait_for_rviz_start      = p('wait_for_rviz_start').value
+
+        self.robot_half_width         = float(p('robot_half_width').value)
+        self.front_stop_dist          = float(p('front_stop_dist').value)
+        self.lidar_estop_dist         = float(p('lidar_estop_dist').value)
+        self.side_near_dist           = float(p('side_near_dist').value)
+        self.side_critical_dist       = float(p('side_critical_dist').value)
+        self.side_emergency_dist      = float(p('side_emergency_dist').value)
+        self.side_emergency_speed_ratio = float(np.clip(p('side_emergency_speed_ratio').value, 0.0, 1.0))
+        self._validate_safety_thresholds()
         self.is_mission_started       = not self.wait_for_rviz_start
         self.current_lane_idx         = 1
 
@@ -250,7 +268,9 @@ class CnnDriverNode(Node):
         self.perception_manager = PerceptionManager(
             inference_handler=self.inference,
             lidar_processor=self.lidar_processor,
-            eor_detector=self.eor_detector
+            eor_detector=self.eor_detector,
+            front_stop_dist=self.front_stop_dist,
+            side_danger_dist=self.side_near_dist
         )
         self.localization_manager = LocalizationManager(
             datum_lat=self.datum_latitude,
@@ -1184,41 +1204,61 @@ class CnnDriverNode(Node):
                         )
                     self._slip_warning_logged = True
 
-            # 3. Nắn chỉnh hướng đầu xe khép vòng IMU 50Hz (Heading Auto-Trim)
+            # 3. Tầng phân tích & nắn chỉnh cục bộ: Khép vòng IMU 50Hz + LiDAR C1 căn tâm miệng Luống 2
             if self.is_trimming_uturn_heading:
                 now_sec = self.get_clock().now().nanoseconds / 1e9
                 yaw_err = math.atan2(
                     math.sin(self.uturn_target_yaw - current_imu_yaw),
                     math.cos(self.uturn_target_yaw - current_imu_yaw)
                 )
-                trim_threshold = math.radians(1.5)  # Chuẩn sai số < 1.5 độ
-                timed_out = (now_sec - self.uturn_trim_start_time) > 4.5
+                trim_threshold = math.radians(2.0)  # Chuẩn sai số góc < 2.0 độ
+                timed_out = (now_sec - self.uturn_trim_start_time) > 5.0
 
-                if abs(yaw_err) <= trim_threshold or timed_out:
+                # Quét phân tích miệng Luống 2 bằng LiDAR C1
+                docking_info = self.lidar_processor.get_row_entrance_centering(
+                    min_fwd=0.20, max_fwd=1.80, expected_row_spacing=self.row_spacing
+                )
+                lat_offset = docking_info["lateral_offset"] if docking_info["detected"] else 0.0
+
+                # Hoàn tất nắn chỉnh khi:
+                # 1. Đầu xe đã song song với trục luống 2 (yaw_err <= 2.0 độ)
+                # 2. VÀ sai lệch tim luống nhỏ (|lat_offset| <= 0.05m) hoặc LiDAR chưa thấy mép cây
+                # Hoặc hết thời gian timeout an toàn (5s)
+                heading_ready = (abs(yaw_err) <= trim_threshold)
+                centering_ready = (not docking_info["detected"]) or (abs(lat_offset) <= 0.05)
+
+                if (heading_ready and centering_ready) or timed_out:
                     self.is_trimming_uturn_heading = False
                     self.StopRobot()
                     start_deg = math.degrees(self.uturn_start_imu_yaw)
                     now_deg = math.degrees(current_imu_yaw)
                     accum_deg = math.degrees(self.uturn_accum_imu_yaw)
-                    status_note = "THÀNH CÔNG HOÀN HẢO" if abs(yaw_err) <= trim_threshold else "TIMEOUT AN TOÀN"
+                    status_note = "THÀNH CÔNG HOÀN HẢO" if (heading_ready and centering_ready) else "TIMEOUT AN TOÀN"
                     self.get_logger().info(
-                        f"✅ [IMU XÁC NHẬN QUAY ĐẦU - {status_note}] Đã quay đúng 180° và căn thẳng vào Luống 2! "
-                        f"(Start: {start_deg:+.1f}°, Hiện tại: {now_deg:+.1f}°, IMU tổng xoay: {accum_deg:.1f}°, Sai lệch trục: {math.degrees(yaw_err):+.2f}°). "
+                        f"✅ [TẦNG PHÂN TÍCH CỤC BỘ - {status_note}] Đã hoàn tất quay đầu và căn chuẩn vào Luống 2! "
+                        f"(Start: {start_deg:+.1f}°, Hiện tại: {now_deg:+.1f}°, IMU quay: {accum_deg:.1f}°, Lệch trục: {math.degrees(yaw_err):+.2f}°, Lệch tim LiDAR: {lat_offset:+.2f}m). "
                         f"Bàn giao quyền điều khiển cho AI CNN!"
                     )
                     if self.enable_file_logging and self.telemetry_logger:
                         self.telemetry_logger.log_event(
                             "UTURN_SUCCESS_IMU",
-                            f"Quay đầu 180° thành công: Start={start_deg:.1f}°, Current={now_deg:.1f}°, Total={accum_deg:.1f}°, Err={math.degrees(yaw_err):.2f}°"
+                            f"Quay đầu 180° thành công: Start={start_deg:.1f}°, Current={now_deg:.1f}°, Total={accum_deg:.1f}°, ErrYaw={math.degrees(yaw_err):.2f}°, LatOffset={lat_offset:.2f}m"
                         )
                     self.transition_after_path(self.get_clock().now())
                 else:
-                    # Xoay nhẹ đầu xe về hướng target Luống 2
                     twist = Twist()
-                    twist.linear.x = 0.0
-                    turn_dir = 1.0 if yaw_err > 0 else -1.0
-                    turn_speed = max(0.20, min(float(self.turn_angular_speed), 0.45))
-                    twist.angular.z = turn_dir * turn_speed
+                    if not heading_ready:
+                        # Ưu tiên 1: Nắn đầu xe song song trục luống 2
+                        twist.linear.x = 0.0
+                        turn_dir = 1.0 if yaw_err > 0 else -1.0
+                        turn_speed = max(0.20, min(float(self.turn_angular_speed), 0.45))
+                        twist.angular.z = turn_dir * turn_speed
+                    else:
+                        # Ưu tiên 2: Đầu xe đã thẳng, nhưng tim xe đang lệch sườn luống 2 -> bò chậm nắn tim
+                        # lat_offset > 0: xe lệch sang phải -> bẻ nhẹ sang trái (angular.z > 0)
+                        twist.linear.x = 0.04
+                        dock_steer = float(np.clip(lat_offset * 1.5, -0.25, 0.25))
+                        twist.angular.z = dock_steer
                     self.cmd_vel_pub.publish(twist)
         else:
             self._prev_imu_yaw_for_turn = None
@@ -1550,13 +1590,15 @@ class CnnDriverNode(Node):
         # ── TRACKING ──────────────────────────────────────────────────
         elif current_state == FSMState.TRACKING:
             # 1. An toàn mũi xe (Bumper collision guard):
-            # Nếu có vật cản cứng nằm ngay sát cản trước (< 0.16m), tạm dừng tiến để bảo vệ khung xe.
-            # Không tự ý chuyển state hay rẽ lung tung vào cây, chờ đường thoáng xe tự bám tiếp.
+            # Chỉ dừng khi vật cản cứng ngay trước cản xe (< front_stop_dist). Sát sườn được xử lý
+            # bằng repulsion + giảm tốc bên dưới (dừng cứng giữa luống dễ gây kẹt xe).
             front_min_dist = perception.get("front_min_dist", float('inf'))
-            if front_min_dist < 0.16:
+            if front_min_dist < self.front_stop_dist:
                 self.StopRobot()
-                self.get_logger().warn_throttle(
-                    1.0, f"⚠️ Mũi xe sát vật cản ({front_min_dist:.2f}m < 0.16m)! Tạm dừng chờ thoáng..."
+                self.get_logger().warn(
+                    f"⚠️ Mũi xe sát vật cản (Mũi: {front_min_dist:.2f}m < {self.front_stop_dist:.2f}m, "
+                    f"Trái: {left_side_dist:.2f}m, Phải: {right_side_dist:.2f}m)! Tạm dừng chờ thoáng...",
+                    throttle_duration_sec=1.0
                 )
                 return
 
@@ -1594,14 +1636,14 @@ class CnnDriverNode(Node):
                     self.cmd_vel_pub.publish(twist)
                     return
 
-            # Xử lý góc lái: Khi camera đủ tin cậy HOẶC khi LiDAR phát hiện xe áp sát thành hàng (< 0.32m)
+            # Xử lý góc lái: Khi camera đủ tin cậy HOẶC khi LiDAR phát hiện xe áp sát thành hàng (< side_near_dist)
             # Tuyệt đối KHÔNG triệt tiêu góc lái về 0 khi xe đang ở vị trí sát sườn nguy hiểm!
             failed = (confidence < self.low_confidence_threshold)
-            near_side_wall = (left_side_dist < 0.32 or right_side_dist < 0.32)
+            near_side_wall = (left_side_dist < self.side_near_dist or right_side_dist < self.side_near_dist)
             
             if not failed or near_side_wall:
-                # Nếu đang áp sát thành hàng hoặc đang xoay căn chỉnh, tăng độ nhạy phản xạ (alpha >= 0.65) để phản xạ tức thì
-                effective_alpha = max(self.ema_alpha, 0.65) if (near_side_wall or self.is_adjusting_heading) else self.ema_alpha
+                # Nếu đang áp sát thành hàng hoặc đang xoay căn chỉnh, tăng độ nhạy phản xạ (alpha >= 0.75) để phản xạ tức thì
+                effective_alpha = max(self.ema_alpha, 0.75) if (near_side_wall or self.is_adjusting_heading) else self.ema_alpha
                 self.smoothed_angle_deg = (
                     effective_alpha * raw_angle
                     + (1.0 - effective_alpha) * self.smoothed_angle_deg
@@ -1707,8 +1749,34 @@ class CnnDriverNode(Node):
                 time_since_resume = now_sec - getattr(self, 'forward_resume_start_time', 0.0)
                 fwd_ramp = min(1.0, time_since_resume / 0.35) if time_since_resume < 0.35 else 1.0
                 lin_speed = self.linear_speed * fwd_ramp
-                # Khi đang chạy thẳng, bù lái nhẹ nhàng liên tục để giữ luống ổn định không khựng xe:
-                ang_vel = float(np.clip(-0.040 * self.smoothed_angle_deg, -0.12, 0.12))
+                
+                # Bẻ lái thích ứng thông minh (Adaptive Steer & Safety Speed Control):
+                # 1. Bình thường: bẻ lái êm dịu, không giật xe (Phong cách A)
+                # 2. Khi sườn xe áp sát hàng (< side_near_dist): tăng độ nhạy và dải góc lái để thoát mép hàng
+                # 3. Khi rất sát nguy hiểm (< side_critical_dist): giảm 50% tốc độ tiến để bẻ lái gắt thoát sườn
+                # 4. Khi sát tới hạn (< side_emergency_dist, vẫn > nửa bề rộng xe): BÒ CHẬM + lái gắt.
+                #    KHÔNG xoay tại chỗ: xoay tại chỗ không đưa tim xe ra xa hàng mà còn quét góc đuôi xe vào hàng.
+                min_side = min(left_side_dist, right_side_dist)
+                is_near_side = (min_side < self.side_near_dist)
+                is_critical_side = (min_side < self.side_critical_dist)
+                is_emergency_side = (min_side < self.side_emergency_dist)
+
+                if is_emergency_side:
+                    lin_speed *= self.side_emergency_speed_ratio  # Bò chậm để tim xe dịch ngang ra khỏi mép hàng
+                    max_w = 0.30
+                    steer_gain = 0.070
+                elif is_critical_side:
+                    lin_speed *= 0.50  # Chậm lại để bán kính bẻ lái gắt thoát sườn an toàn
+                    max_w = 0.35
+                    steer_gain = 0.060
+                elif is_near_side:
+                    max_w = 0.25
+                    steer_gain = 0.050
+                else:
+                    max_w = 0.15
+                    steer_gain = 0.040
+
+                ang_vel = float(np.clip(-steer_gain * self.smoothed_angle_deg, -max_w, max_w))
 
             twist.linear.x = lin_speed
             twist.angular.z = ang_vel
@@ -1916,36 +1984,52 @@ class CnnDriverNode(Node):
                 yaw_err_deg = math.degrees(yaw_err_to_row2)
 
                 if finished or (confidence >= self.high_confidence_threshold and is_turned_around):
-                    # Nếu xe đã xong cung Omega nhưng đầu xe còn lệch trục luống (> 2.0 độ):
-                    if abs(yaw_err_deg) > 2.0:
+                    # Quét phân tích miệng Luống 2 bằng LiDAR C1
+                    docking_info = self.lidar_processor.get_row_entrance_centering(
+                        min_fwd=0.20, max_fwd=1.80, expected_row_spacing=self.row_spacing
+                    )
+                    lat_offset = docking_info["lateral_offset"] if docking_info["detected"] else 0.0
+
+                    # Nếu đầu xe còn lệch trục luống (> 2.0 độ) HOẶC tim xe bị lệch sườn luống (> 0.05m):
+                    if abs(yaw_err_deg) > 2.0 or (docking_info["detected"] and abs(lat_offset) > 0.05):
                         if not self.is_trimming_uturn_heading:
                             self.is_trimming_uturn_heading = True
                             self.uturn_trim_start_time = now.nanoseconds / 1e9
                             self.StopRobot()
                             self.get_logger().info(
-                                f"🔄 [NẮN CHỈNH HƯỚNG LUỐNG 2] Cung Omega hoàn tất nhưng đầu xe còn lệch {yaw_err_deg:+.1f}° so với trục luống -> IMU 50Hz tự động nắn chỉnh chuẩn 180°..."
+                                f"🔄 [TẦNG PHÂN TÍCH CỤC BỘ] Cung Omega hoàn tất (Góc lệch: {yaw_err_deg:+.1f}°, Lệch tim LiDAR: {lat_offset:+.2f}m) "
+                                f"-> Kích hoạt tầng nắn chỉnh khép vòng IMU + LiDAR bám tim Luống 2..."
                             )
                         return
                     else:
-                        # Đầu xe đã thẳng đẹp vào Luống 2 (lệch <= 2.0 độ):
+                        # Đầu xe đã thẳng đẹp và nằm đúng tim Luống 2:
                         self.StopRobot()
                         start_deg = math.degrees(self.uturn_start_imu_yaw)
                         now_deg = math.degrees(current_imu_yaw)
                         accum_deg = math.degrees(self.uturn_accum_imu_yaw)
                         self.get_logger().info(
-                            f"✅ [IMU XÁC NHẬN QUAY ĐẦU THÀNH CÔNG] Đã quay đúng 180° và căn thẳng vào Luống 2! "
-                            f"(Start: {start_deg:+.1f}°, Hiện tại: {now_deg:+.1f}°, IMU xoay: {accum_deg:.1f}°, Lệch trục: {yaw_err_deg:+.2f}°). "
+                            f"✅ [TẦNG PHÂN TÍCH CỤC BỘ - THÀNH CÔNG] Đã quay đủ 180° và căn chuẩn tim Luống 2! "
+                            f"(Start: {start_deg:+.1f}°, Hiện tại: {now_deg:+.1f}°, IMU xoay: {accum_deg:.1f}°, Lệch trục: {yaw_err_deg:+.2f}°, Lệch tim: {lat_offset:+.2f}m). "
                             f"Chuyển sang TRACKING Luống 2!"
                         )
                         if self.enable_file_logging and self.telemetry_logger:
                             self.telemetry_logger.log_event(
                                 "UTURN_SUCCESS_IMU",
-                                f"Quay đầu 180° thành công: Start={start_deg:.1f}°, Current={now_deg:.1f}°, Total={accum_deg:.1f}°, Err={yaw_err_deg:.2f}°"
+                                f"Quay đầu 180° thành công: Start={start_deg:.1f}°, Current={now_deg:.1f}°, Total={accum_deg:.1f}°, ErrYaw={yaw_err_deg:.2f}°, LatOffset={lat_offset:.2f}m"
                             )
                         self.transition_after_path(now)
                 else:
+                    # Bù trượt vi sai thời gian thực (Active Turn Slip Compensation):
+                    # Nếu đang ôm cua mà vận tốc góc thực tế từ IMU bị hụt do trượt đất:
+                    actual_gyro_z = getattr(self.localization_manager, 'imu_angular_vel_z', 0.0)
+                    compensated_ang_vel = ang_vel
+                    if abs(ang_vel) > 0.12 and abs(actual_gyro_z) > 0.04:
+                        if (ang_vel * actual_gyro_z > 0) and (abs(actual_gyro_z) < 0.75 * abs(ang_vel)):
+                            boost_factor = min(1.35, abs(ang_vel) / max(0.06, abs(actual_gyro_z)))
+                            compensated_ang_vel = ang_vel * boost_factor
+
                     twist.linear.x = lin_vel
-                    twist.angular.z = ang_vel
+                    twist.angular.z = compensated_ang_vel
             else:
                 lane_center = self.current_lane_y
                 returned_to_center = (abs(self.current_y - lane_center) < 0.04) and (path_idx >= 12)
@@ -1965,6 +2049,16 @@ class CnnDriverNode(Node):
 
         # ── UTURN_EXECUTION ───────────────────────────────────────────
         elif current_state == FSMState.UTURN_EXECUTION:
+            # Kiểm tra an toàn vật cản khi quay đầu ngoài bãi trống
+            front_min_dist = perception.get("front_min_dist", float('inf'))
+            if front_min_dist < self.front_stop_dist or perception.get("obstacle_detected", False):
+                self.StopRobot()
+                self.get_logger().warn(
+                    f"⚠️ Vật cản khi quay đầu (Mũi: {front_min_dist:.2f}m, ngưỡng {self.front_stop_dist:.2f}m)! Tạm dừng phanh an toàn...",
+                    throttle_duration_sec=1.0
+                )
+                return
+
             # Pivot/rotate continuously in place until CNN detects the new row
             # Use forward velocity so it traces a smooth wider arc into the row
             twist.linear.x  = self.turn_linear_speed
@@ -2042,6 +2136,8 @@ class CnnDriverNode(Node):
         self._latest_twist = twist
         self._latest_gps_info = gps_info
         self._latest_inf_ms = getattr(self, '_last_inference_ms', 0.0)
+        self._latest_left_side = left_side_dist
+        self._latest_right_side = right_side_dist
 
     def status_timer_callback(self):
         """Định kỳ in trạng thái trực quan chuẩn 1 Hz ra terminal khi đang tự hành."""
@@ -2071,6 +2167,10 @@ class CnnDriverNode(Node):
         gps_source = self._latest_gps_info.get('source', '')
         gps_str = f" | GPS: {self._latest_gps_info.get('latitude', 0.0):.5f}°, {self._latest_gps_info.get('longitude', 0.0):.5f}°" if (gps_status == 'FIX' and gps_source == 'DIRECT_SENSOR') else ""
 
+        l_dist = getattr(self, '_latest_left_side', float('inf'))
+        r_dist = getattr(self, '_latest_right_side', float('inf'))
+        lidar_str = f" | Sườn: [L:{l_dist:4.2f}m R:{r_dist:4.2f}m]" if (l_dist < 4.0 or r_dist < 4.0) else ""
+
         if not self.is_mission_started:
             display_state_str = "CHỜ RVIZ"
         elif self.is_adjusting_heading:
@@ -2084,15 +2184,55 @@ class CnnDriverNode(Node):
             f"Tin cậy: {self._latest_confidence*100:4.1f}% | "
             f"AI: {inf_ms:2.0f}ms ({fps_val:3.1f}FPS) | "
             f"V: {self._latest_twist.linear.x:.2f}m/s"
+            f"{lidar_str}"
             f"{gps_str}"
         )
         self.get_logger().info(status_msg)
         if self.enable_file_logging and self.telemetry_logger:
             self.telemetry_logger.log_event("SYSTEM_STATUS", status_msg)
 
-    # ── Laser Scan Callback ──────────────────────────────────────────
+    # ── Laser Scan Callback (Lá chắn an toàn phản xạ cứng 15 Hz) ─────
     def scan_callback(self, msg: LaserScan):
         self.lidar_processor.update_scan(msg)
+
+        # PHẢN XẠ PHANH KHẨN CẤP THỜI GIAN THỰC 15Hz (< 66ms, không phụ thuộc tần số camera):
+        # Nếu xe đang di chuyển mà LiDAR quét thấy nguy cơ va chạm sát cản trước (< lidar_estop_dist):
+        if self.is_mission_started and self.fsm.get_state() in [FSMState.TRACKING, FSMState.UTURN_EXECUTION]:
+            f_dist = self.lidar_processor.get_min_range_in_sector(-25.0, 25.0)
+            if f_dist < self.lidar_estop_dist:
+                stop_twist = Twist()
+                stop_twist.linear.x = 0.0
+                stop_twist.angular.z = 0.0
+                self.cmd_vel_pub.publish(stop_twist)
+                self.get_logger().warn(
+                    f"🛑 [LIDAR LÁ CHẮN 15Hz] Phanh khẩn cấp trước mũi xe! ({f_dist:.2f}m < {self.lidar_estop_dist:.2f}m)",
+                    throttle_duration_sec=1.0
+                )
+
+    def _validate_safety_thresholds(self):
+        """Đảm bảo các ngưỡng sườn luôn > nửa bề rộng xe và đúng thứ tự near > critical > emergency."""
+        min_margin = 0.02  # m — mép bánh phải còn cách hàng ít nhất 2cm khi kích hoạt mức tới hạn
+        floor = self.robot_half_width + min_margin
+        if self.side_emergency_dist < floor:
+            self.get_logger().warn(
+                f"side_emergency_dist={self.side_emergency_dist:.2f}m <= nửa bề rộng xe "
+                f"({self.robot_half_width:.2f}m) -> bánh đã chạm hàng trước khi kích hoạt! Nâng lên {floor:.2f}m."
+            )
+            self.side_emergency_dist = floor
+        if self.side_critical_dist < self.side_emergency_dist:
+            self.get_logger().warn("side_critical_dist < side_emergency_dist -> đặt bằng side_emergency_dist.")
+            self.side_critical_dist = self.side_emergency_dist
+        if self.side_near_dist < self.side_critical_dist:
+            self.get_logger().warn("side_near_dist < side_critical_dist -> đặt bằng side_critical_dist.")
+            self.side_near_dist = self.side_critical_dist
+        if self.lidar_estop_dist > self.front_stop_dist:
+            self.get_logger().warn("lidar_estop_dist > front_stop_dist -> đặt bằng front_stop_dist.")
+            self.lidar_estop_dist = self.front_stop_dist
+        self.get_logger().info(
+            f"[SAFETY] half_width={self.robot_half_width:.2f} | front_stop={self.front_stop_dist:.2f} | "
+            f"estop={self.lidar_estop_dist:.2f} | side near/crit/emerg="
+            f"{self.side_near_dist:.2f}/{self.side_critical_dist:.2f}/{self.side_emergency_dist:.2f}m"
+        )
 
     # ── Fallback U-turn path generator ──────────────────────────────
     def generate_backup_uturn_path(self, goal_x, goal_y):

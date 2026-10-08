@@ -16,7 +16,6 @@ class LidarProcessor:
         if self.latest_scan is None:
             return False
 
-        dir_x = 1.0 if math.cos(ryaw) >= 0 else -1.0
         angle_min = self.latest_scan.angle_min
         angle_increment = self.latest_scan.angle_increment
         ranges = self.latest_scan.ranges
@@ -177,6 +176,66 @@ class LidarProcessor:
             "lane_center": lane_center,
             "side": side
         }
+
+    def get_row_entrance_centering(self, min_fwd=0.20, max_fwd=1.80, expected_row_spacing=1.20):
+        """
+        Phân tích miệng Luống 2 bằng LiDAR C1 khi xe quay đầu hướng vào luống mới.
+        Quét cụm thân cây bên sườn trái (y > 0) và sườn phải (y < 0).
+        Trả về:
+          - detected: bool (nhận dạng thấy cả 2 mép luống)
+          - lateral_offset: float (độ lệch tim xe so với tim luống: dương = xe lệch phải cần sang trái, âm = lệch trái)
+          - left_dist: float (khoảng cách mép trái)
+          - right_dist: float (khoảng cách mép phải)
+          - measured_spacing: float (khoảng cách đo được giữa 2 hàng luống)
+        """
+        if self.latest_scan is None:
+            return {"detected": False, "lateral_offset": 0.0, "left_dist": 0.6, "right_dist": 0.6, "measured_spacing": expected_row_spacing}
+
+        angle_min = self.latest_scan.angle_min
+        angle_increment = self.latest_scan.angle_increment
+        ranges = self.latest_scan.ranges
+
+        left_points_y = []
+        right_points_y = []
+
+        half_spacing = expected_row_spacing / 2.0
+        max_lateral = half_spacing + 0.35
+
+        for idx, r in enumerate(ranges):
+            if math.isnan(r) or math.isinf(r) or r < 0.10 or r > 3.0:
+                continue
+
+            angle = angle_min + idx * angle_increment
+            x_fwd = r * math.cos(angle)
+            y_lat = r * math.sin(angle)
+
+            # Xét các điểm phía trước mũi xe trong hành lang tiếp cận luống
+            if min_fwd <= x_fwd <= max_fwd:
+                if 0.15 <= y_lat <= max_lateral:
+                    left_points_y.append(y_lat)
+                elif -max_lateral <= y_lat <= -0.15:
+                    right_points_y.append(abs(y_lat))
+
+        if len(left_points_y) >= 3 and len(right_points_y) >= 3:
+            left_points_y.sort()
+            right_points_y.sort()
+            # Lấy phân vị thấp (điểm mép luống gần tim xe nhất)
+            d_left = left_points_y[len(left_points_y) // 4]
+            d_right = right_points_y[len(right_points_y) // 4]
+
+            # Độ lệch tim xe (dương: tim xe lệch phải so với tim luống -> cần rẽ trái nắn tim)
+            lateral_offset = (d_left - d_right) / 2.0
+            measured_spacing = d_left + d_right
+
+            return {
+                "detected": True,
+                "lateral_offset": float(lateral_offset),
+                "left_dist": float(d_left),
+                "right_dist": float(d_right),
+                "measured_spacing": float(measured_spacing)
+            }
+
+        return {"detected": False, "lateral_offset": 0.0, "left_dist": 0.6, "right_dist": 0.6, "measured_spacing": expected_row_spacing}
 
 
 def main(args=None):
