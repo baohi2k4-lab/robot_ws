@@ -383,6 +383,8 @@ class CnnDriverNode(Node):
         self.marker_pub    = self.create_publisher(MarkerArray, '/mission_markers', 10)
         self.plan_timer    = self.create_timer(0.5, self._plan_and_markers_timer_callback)
         self.heading_adjust_timer = self.create_timer(0.05, self._heading_adjust_timer_callback)
+        self.ai_view_pub   = self.create_publisher(Image, '/camera/ai_view', 2)
+        self._received_frame_count = 0
 
         self.image_sub = self.create_subscription(
             Image, self.image_topic, self.image_callback, 10)
@@ -1478,6 +1480,39 @@ class CnnDriverNode(Node):
         lane_offset = perception["lane_offset"]
         left_side_dist = perception.get("left_side_dist", float('inf'))
         right_side_dist = perception.get("right_side_dist", float('inf'))
+
+        # Log xác nhận nhận ảnh thực tế từ Camera
+        self._received_frame_count += 1
+        if self._received_frame_count == 1:
+            self.get_logger().info(
+                f"📷 [CNN ĐÃ NHẬN ẢNH TỪ CAMERA] Frame #1: {bgr_image.shape[1]}x{bgr_image.shape[0]} | BGR8 | "
+                f"Góc lái AI tính: {raw_angle:+.2f}° (Tin cậy: {confidence*100:.1f}%) | Độ trễ AI: {self._last_inference_ms:.1f}ms"
+            )
+        elif self._received_frame_count % 30 == 0:
+            self.get_logger().info(
+                f"📷 [CNN NHẬN ẢNH #{self._received_frame_count}] Góc: {raw_angle:+.2f}° | "
+                f"Tin cậy: {confidence*100:.1f}% | AI: {self._last_inference_ms:.1f}ms",
+                throttle_duration_sec=1.5
+            )
+
+        # Xuất bản HUD AI thời gian thực lên topic /camera/ai_view để xem trực tiếp
+        if getattr(self, 'ai_view_pub', None) is not None and self.bridge is not None:
+            try:
+                h, w = bgr_image.shape[:2]
+                img_cx = int((w - 1) / 2.0)
+                lane_cx_px = int(lane_center * (w / 384.0)) if hasattr(self, 'inference') and self.inference else img_cx
+                lane_cx_px = int(np.clip(lane_cx_px, 0, w - 1))
+                hud_frame = bgr_image.copy()
+                for y_s in range(0, h, 25):
+                    cv2.line(hud_frame, (img_cx, y_s), (img_cx, min(y_s + 15, h)), (0, 255, 0), 2)
+                cv2.line(hud_frame, (lane_cx_px, h - 1), (lane_cx_px, int(h * 0.4)), (255, 140, 0), 3)
+                cv2.putText(hud_frame, f"Frame #{self._received_frame_count} | Conf: {confidence*100:.1f}% | Steer: {self.smoothed_angle_deg:+.2f} deg",
+                            (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                ai_msg = self.bridge.cv2_to_imgmsg(hud_frame, encoding='bgr8')
+                ai_msg.header = msg.header
+                self.ai_view_pub.publish(ai_msg)
+            except Exception:
+                pass
 
         # ── FSM ───────────────────────────────────────────────────────
         twist        = Twist()

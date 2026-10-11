@@ -521,13 +521,34 @@ alias offload-cnn="laptop_cnn_func"
 # - Laptop: Cắm cáp RealSense D435 hoặc iPhone vào cổng USB Laptop, chạy: 'laptop-ai'
 laptop_ai_func() {
     load_ws
+    local cam_arg="camera_device:=http://172.20.10.1:4747/video"
+    if [ "$#" -ge 1 ]; then
+        local first="$1"
+        if [[ "$first" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            if [[ "$first" == *":4747"* ]] || [[ "$first" == *"/video"* ]]; then
+                cam_arg="camera_device:=${first}"
+            else
+                cam_arg="camera_device:=http://${first}:4747/video"
+            fi
+            shift
+        elif [[ "$first" =~ ^https?:// ]] || [[ "$first" =~ ^rtsp:// ]]; then
+            cam_arg="camera_device:=${first}"
+            shift
+        elif [ "$first" = "iphone" ] || [ "$first" = "droidcam" ]; then
+            cam_arg="camera_device:=http://172.20.10.1:4747/video"
+            shift
+        elif [ "$first" = "auto" ] || [ "$first" = "d435" ]; then
+            cam_arg="camera_device:=auto"
+            shift
+        fi
+    fi
     echo "================================================================================"
-    echo "💻 [LAPTOP-AI] KHỞI ĐỘNG CAMERA USB TRÊN LAPTOP + AI CNN ĐIỀU KHIỂN XE THẬT"
-    echo "   📷 Camera cắm trực tiếp cổng USB Laptop (0ms trễ)"
+    echo "💻 [LAPTOP-AI] KHỞI ĐỘNG CAMERA IPHONE DROIDCAM (IP TĨNH: 172.20.10.1) + AI CNN"
+    echo "   📷 Nguồn camera: ${cam_arg#camera_device:=}"
     echo "   ⚡ Model ONNX chạy GPU/CPU Laptop (30 - 60 FPS)"
     echo "   📡 Nhận LiDAR/IMU/GPS từ Pi ➔ Bắn lệnh /cmd_vel sang Pi lái 4 bánh"
     echo "================================================================================"
-    ros2 launch my_robot_bringup laptop_ai.launch.py "$@"
+    ros2 launch my_robot_bringup laptop_ai.launch.py "$cam_arg" "$@"
 }
 alias laptop-ai="laptop_ai_func"
 alias xe-laptop="laptop_ai_func"
@@ -536,6 +557,8 @@ alias lap-ai="laptop_ai_func"
 
 # Lệnh KIỂM TRA CHẨN ĐOÁN TOÀN DIỆN CHUỖI AI CNN
 alias check-cnn="load_ws && python3 \"$WS_DIR/scripts/verify_cnn_pipeline.py\""
+alias check-cam="load_ws && python3 \"$WS_DIR/scripts/check_live_camera_cnn.py\""
+alias xem-cam="load_ws && ros2 run rqt_image_view rqt_image_view /camera/ai_view"
 
 # Lệnh CHẠY THỬ SUY LUẬN AI CNN TRÊN ẢNH (Mô phỏng 100% xe thật bám luống)
 alias test-img="load_ws && python3 \"$WS_DIR/scripts/test_inference_images.py\""
