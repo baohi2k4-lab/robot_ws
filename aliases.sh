@@ -44,10 +44,20 @@ load_ws() {
     if [ -f "/opt/ros/jazzy/lib/librmw_cyclonedds_cpp.so" ] || [ -f "/opt/ros/humble/lib/librmw_cyclonedds_cpp.so" ] || [ -f "/usr/lib/librmw_cyclonedds_cpp.so" ]; then
         export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
         if [ -f "$WS_DIR/cyclonedds.xml" ]; then
-            export CYCLONEDDS_URI="file://$WS_DIR/cyclonedds.xml"
-            cp -f "$WS_DIR/cyclonedds.xml" "$HOME/.cyclonedds.xml" 2>/dev/null || true
-        elif [ -f "$HOME/.cyclonedds.xml" ]; then
-            export CYCLONEDDS_URI="file://$HOME/.cyclonedds.xml"
+            # Tự động gán đúng IP card mạng LAN (192.168.10.1 cho Laptop, 192.168.10.2 cho Pi)
+            local my_eth_ip
+            my_eth_ip=$(ip -4 addr show 2>/dev/null | grep -oP 'inet \K192\.168\.10\.[12]' | head -1)
+            if [ -n "$my_eth_ip" ] && grep -q '192\.168\.10\.' "$WS_DIR/cyclonedds.xml"; then
+                sed -i "s|<NetworkInterface address=\"192\.168\.10\.[12]\"|<NetworkInterface address=\"$my_eth_ip\"|g" "$WS_DIR/cyclonedds.xml" 2>/dev/null || true
+                export CYCLONEDDS_URI="file://$WS_DIR/cyclonedds.xml"
+                cp -f "$WS_DIR/cyclonedds.xml" "$HOME/.cyclonedds.xml" 2>/dev/null || true
+            else
+                # Nếu không cắm cáp mạng LAN 192.168.10.x: không ép buộc CYCLONEDDS_URI để tránh lỗi 'interface not available'
+                unset CYCLONEDDS_URI
+                rm -f "$HOME/.cyclonedds.xml" 2>/dev/null || true
+            fi
+        else
+            unset CYCLONEDDS_URI
         fi
     else
         unset RMW_IMPLEMENTATION
@@ -75,8 +85,8 @@ build_func() {
     colcon build --symlink-install "$@"
     local ret=$?
     if [ $ret -ne 0 ]; then
-        echo "⚠️ Thử dọn dẹp cache build của my_robot_controller và biên dịch lại..."
-        rm -rf "$WS_DIR/build/my_robot_controller"
+        echo "⚠️ Thử dọn dẹp cache build bị lỗi (sllidar, imu, controller) và biên dịch lại..."
+        rm -rf "$WS_DIR/build/my_robot_controller" "$WS_DIR/build/sllidar_ros2" "$WS_DIR/build/imu_complementary_filter" "$WS_DIR/build/imu_filter_madgwick" "$WS_DIR/build/rviz_imu_plugin"
         colcon build --symlink-install "$@"
         ret=$?
     fi
@@ -94,7 +104,14 @@ build_func() {
     fi
 }
 alias build="build_func"
+alias biuld="build_func"
 alias rb-build="build_func"
+
+# Lệnh SSH nhanh và Chạy trực tiếp trên Raspberry Pi từ Laptop (1-Click Remote)
+alias ssh-pi="ssh bao@192.168.10.2"
+alias pi-hw="ssh -t bao@192.168.10.2 'cd ~/robot_ws && source aliases.sh && real-hw'"
+alias pi-cnn="ssh -t bao@192.168.10.2 'cd ~/robot_ws && source aliases.sh && real-cnn'"
+alias pi-test="ssh -t bao@192.168.10.2 'cd ~/robot_ws && source aliases.sh && test-xe'"
 
 build_all_func() {
     cd "$WS_DIR"
@@ -232,17 +249,76 @@ alias test-gps="load_ws && ros2 run my_robot_controller gps_driver --ros-args -p
 alias run-encoder="load_ws && ros2 run encoder_odom encoder_node --ros-args -p serial_port:=/dev/ttyACM0"
 alias encoder="run-encoder"
 alias test-esp32="load_ws && ros2 run my_robot_bringup esp32_bridge --ros-args -p serial_port:=/dev/esp32"
+alias chup-yolo="python3 \"$WS_DIR/scripts/capture_yolo_dataset.py\""
+alias capture-yolo="chup-yolo"
+alias chup-anh="chup-yolo"
+
+# Lệnh kiểm tra toàn diện động cơ 4 bánh, xung Encoder, IMU và LiDAR trực tiếp trên xe thật
+test_xe_func() {
+    load_ws
+    if [ -e "/dev/esp32" ] || [ -e "/dev/ttyACM0" ]; then
+        python3 "$WS_DIR/scripts/test_motor_hardware_live.py" "$@"
+    else
+        echo "📡 Đang chạy kiểm tra phần cứng trực tiếp trên Raspberry Pi (192.168.10.2)..."
+        ssh -t bao@192.168.10.2 "python3 /home/bao/robot_ws/scripts/test_motor_hardware_live.py"
+    fi
+}
+alias test-xe="test_xe_func"
+alias test-banh="test_xe_func"
+alias kiemtra-xe="test_xe_func"
+alias test-luc="test_xe_func"
 
 # Lệnh nạp Firmware ESP32-S3 tự động từ Raspberry Pi
 nap_esp32_func() {
-    bash "$WS_DIR/src/esp32_source/nap_code_esp32.sh" "$@"
+    if [ -f "$WS_DIR/scripts/flash_esp32.sh" ]; then
+        bash "$WS_DIR/scripts/flash_esp32.sh" "$@"
+    else
+        bash "$WS_DIR/src/esp32_source/nap_code_esp32.sh" "$@"
+    fi
 }
 alias nap-esp32="nap_esp32_func"
 alias flash-esp32="nap_esp32_func"
+alias nap-esp="nap_esp32_func"
+alias flash-esp="nap_esp32_func"
+
+# Theo dõi trực tiếp luồng Serial gửi từ ESP32 (/dev/esp32 @ 115200 baud)
+xem_esp_func() {
+    local port="${1:-/dev/esp32}"
+    if [ ! -e "$port" ] && [ -e "/dev/ttyACM0" ]; then
+        port="/dev/ttyACM0"
+    fi
+    if [ ! -e "$port" ]; then
+        if ping -c 1 -W 1 192.168.10.2 >/dev/null 2>&1; then
+            echo "💡 Không tìm thấy $port cục bộ trên Laptop."
+            echo "📡 Phát hiện Raspberry Pi (192.168.10.2) đang kết nối -> Đang xem luồng Serial ESP32 qua Pi..."
+            ssh -t bao@192.168.10.2 "xem-esp"
+            return $?
+        fi
+        echo "❌ Không tìm thấy cổng $port! Hãy kiểm tra cáp USB cắm vào ESP32."
+        return 1
+    fi
+    echo "📡 Đang kết nối xem luồng Serial từ ESP32 tại $port (Ctrl+C để thoát)..."
+    python3 -c "
+import serial, sys
+try:
+    s = serial.Serial('$port', 115200, timeout=1.0)
+    while True:
+        line = s.readline().decode('utf-8', errors='ignore').strip()
+        if line:
+            print('>>', line)
+except KeyboardInterrupt:
+    print('\nĐã dừng xem Serial.')
+except Exception as e:
+    print('Lỗi:', e)
+"
+}
+alias xem-esp="xem_esp_func"
+alias log-esp="xem_esp_func"
+alias test-esp="test-esp32"
 alias test-all="load_ws && ros2 launch my_sensor_test test_all_sensors.launch.py"
 alias test-slam="load_ws && bash \"$WS_DIR/src/my_sensor_test/scripts/run_test_slam.sh\""
 
-# Hàm tự động phát hiện nguồn camera tối ưu (Ưu tiên Camera iPhone DroidCam)
+# Hàm tự động phát hiện nguồn camera tối ưu (Ưu tiên RealSense D435 > iPhone DroidCam > USB Webcam)
 detect_camera_device() {
     for arg in "$@"; do
         if [[ "$arg" == camera_device* ]]; then
@@ -250,18 +326,23 @@ detect_camera_device() {
             return 0
         fi
     done
-    # Ưu tiên 1: Tự động kết nối Camera iPhone (DroidCam qua Wi-Fi Hotspot / Cáp USB 172.20.10.1)
+    # Ưu tiên 1: RealSense D435 cắm qua USB (Hardware IR Stereo Depth + RGB 640x480 @ 30 FPS)
+    if lsusb 2>/dev/null | grep -qiE "8086:0b07|RealSense"; then
+        echo "camera_device:=auto"
+        return 0
+    fi
+    # Ưu tiên 2: Tự động kết nối Camera iPhone (DroidCam qua Wi-Fi Hotspot / Cáp USB 172.20.10.1)
     if ip route 2>/dev/null | grep -q "172.20.10" || ping -c 1 -W 1 172.20.10.1 &>/dev/null; then
         echo "camera_device:=http://172.20.10.1:4747/video"
         return 0
     fi
-    # Ưu tiên 2: Cổng USB Webcam vật lý /dev/video0 nếu có
+    # Ưu tiên 3: Cổng USB Webcam vật lý /dev/video0 nếu có
     if [ -e "/dev/video0" ]; then
         echo "camera_device:=/dev/video0"
         return 0
     fi
-    # Mặc định: Luồng iPhone DroidCam
-    echo "camera_device:=http://172.20.10.1:4747/video"
+    # Mặc định: auto
+    echo "camera_device:=auto"
     return 0
 }
 
@@ -442,7 +523,7 @@ real_cnn_func() {
     echo ""
     echo "================================================================================"
     echo "✅ [REAL-CNN] Đã dừng xe. Toàn bộ dữ liệu lái xe đã lưu tại: $WS_DIR/logs/"
-    echo "👉 Xem đồ thị: gõ 'plot-lai' | Xem bảng số liệu: gõ 'xem-lai'"
+    echo "👉 Sổ nhật ký: gõ 'lich-su' | Xem bảng: gõ 'xem-lai' | Xem đồ thị: gõ 'plot-lai'"
     echo "================================================================================"
 }
 alias real-cnn="real_cnn_func"
@@ -451,6 +532,10 @@ alias cnn-auto="real-cnn"
 alias fix-cam="sudo fuser -k /dev/video* 2>/dev/null || true; echo '✅ Đã giải phóng cổng Camera USB /dev/video*!'"
 
 # Phím tắt xem và phân tích dữ liệu log lái xe real-cnn
+alias lich-su="python3 \"$WS_DIR/scripts/generate_run_history.py\""
+alias lichsu="lich-su"
+alias nhat-ky="lich-su"
+alias run-history="lich-su"
 alias xem-lai="python3 \"$WS_DIR/scripts/view_telemetry.py\""
 alias xem-log="python3 \"$WS_DIR/scripts/view_telemetry.py\""
 alias log-lai="python3 \"$WS_DIR/scripts/view_telemetry.py\""
@@ -521,7 +606,7 @@ alias offload-cnn="laptop_cnn_func"
 # - Laptop: Cắm cáp RealSense D435 hoặc iPhone vào cổng USB Laptop, chạy: 'laptop-ai'
 laptop_ai_func() {
     load_ws
-    local cam_arg="camera_device:=http://172.20.10.1:4747/video"
+    local cam_arg
     if [ "$#" -ge 1 ]; then
         local first="$1"
         if [[ "$first" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ ]]; then
@@ -537,14 +622,21 @@ laptop_ai_func() {
         elif [ "$first" = "iphone" ] || [ "$first" = "droidcam" ]; then
             cam_arg="camera_device:=http://172.20.10.1:4747/video"
             shift
-        elif [ "$first" = "auto" ] || [ "$first" = "d435" ]; then
+        elif [ "$first" = "auto" ] || [ "$first" = "d435" ] || [ "$first" = "realsense" ]; then
             cam_arg="camera_device:=auto"
             shift
         fi
     fi
+    if [ -z "$cam_arg" ]; then
+        cam_arg=$(detect_camera_device)
+    fi
+
     echo "================================================================================"
-    echo "💻 [LAPTOP-AI] KHỞI ĐỘNG CAMERA IPHONE DROIDCAM (IP TĨNH: 172.20.10.1) + AI CNN"
+    echo "💻 [LAPTOP-AI] KHỞI ĐỘNG HỆ THỐNG AI CNN TRÊN LAPTOP + ĐIỀU KHIỂN XE THẬT"
     echo "   📷 Nguồn camera: ${cam_arg#camera_device:=}"
+    if lsusb 2>/dev/null | grep -qiE "8086:0b07|RealSense"; then
+        echo "   🎯 RealSense D435: Đã kích hoạt Dual Stream (RGB 640x480 + Depth Map 16UC1 @ 30 FPS)"
+    fi
     echo "   ⚡ Model ONNX chạy GPU/CPU Laptop (30 - 60 FPS)"
     echo "   📡 Nhận LiDAR/IMU/GPS từ Pi ➔ Bắn lệnh /cmd_vel sang Pi lái 4 bánh"
     echo "================================================================================"
@@ -555,10 +647,18 @@ alias xe-laptop="laptop_ai_func"
 alias ai-laptop="laptop_ai_func"
 alias lap-ai="laptop_ai_func"
 
-# Lệnh KIỂM TRA CHẨN ĐOÁN TOÀN DIỆN CHUỖI AI CNN
+# Lệnh KIỂM TRA CHẨN ĐOÁN TOÀN DIỆN CHUỖI AI CNN & CAMERA REALSENSE
 alias check-cnn="load_ws && python3 \"$WS_DIR/scripts/verify_cnn_pipeline.py\""
 alias check-cam="load_ws && python3 \"$WS_DIR/scripts/check_live_camera_cnn.py\""
-alias xem-cam="load_ws && ros2 run rqt_image_view rqt_image_view /camera/ai_view"
+alias test-d435="load_ws && python3 \"$WS_DIR/scripts/check_realsense_depth.py\""
+alias test-depth="test-d435"
+alias xem-cam="python3 \"$WS_DIR/scripts/view_camera_live.py\""
+alias live-cam="python3 \"$WS_DIR/scripts/view_camera_live.py\""
+alias chup-anh="python3 \"$WS_DIR/scripts/capture_yolo_dataset.py\""
+alias capture-yolo="python3 \"$WS_DIR/scripts/capture_yolo_dataset.py\""
+alias xem-ai="load_ws && ros2 run rqt_image_view rqt_image_view /camera/ai_view"
+alias xem-depth="load_ws && ros2 run rqt_image_view rqt_image_view /camera/depth/image_colored"
+alias xem-color="load_ws && ros2 run rqt_image_view rqt_image_view /camera/color/image_raw"
 
 # Lệnh CHẠY THỬ SUY LUẬN AI CNN TRÊN ẢNH (Mô phỏng 100% xe thật bám luống)
 alias test-img="load_ws && python3 \"$WS_DIR/scripts/test_inference_images.py\""
@@ -914,12 +1014,15 @@ setup_eth_direct_func() {
     sudo ip addr flush dev "$eth_iface" 2>/dev/null || true
     sudo ip addr add "${LAPTOP_IP}/24" dev "$eth_iface"
     sudo ip link set "$eth_iface" up
-    # Cập nhật CycloneDDS dùng unicast IP mới
+    # Cập nhật CycloneDDS dùng unicast IP mới (Khóa cứng card LAN để không bị nhiễu bởi Wi-Fi Hotspot)
     cat > "$WS_DIR/cyclonedds.xml" <<XMLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <CycloneDDS xmlns="https://cdds.io/config">
   <Domain>
     <General>
+      <Interfaces>
+        <NetworkInterface address="${LAPTOP_IP}" />
+      </Interfaces>
       <AllowMulticast>false</AllowMulticast>
       <MaxMessageSize>65500B</MaxMessageSize>
     </General>
@@ -934,22 +1037,46 @@ setup_eth_direct_func() {
   </Domain>
 </CycloneDDS>
 XMLEOF
+    cp -f "$WS_DIR/cyclonedds.xml" "$HOME/.cyclonedds.xml" 2>/dev/null || true
     export CYCLONEDDS_URI="file://$WS_DIR/cyclonedds.xml"
     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
     export ROS_DOMAIN_ID=42
     echo ""
-    echo "✅ [ETH DIRECT] Cấu hình xong!"
-    echo "   📡 ROS 2 sẽ dùng: $eth_iface (unicast, không multicast)"
-    echo "   ⚡ Độ trễ kỳ vọng: < 1ms"
+    echo "✅ [ETH DIRECT] Cấu hình Laptop xong!"
+    echo "   📡 ROS 2 khóa cứng cổng: $eth_iface ($LAPTOP_IP)"
+    echo "   ⚡ Độ trễ kỳ vọng: < 1ms (Hoàn toàn độc lập với Wi-Fi Hotspot)"
     echo ""
-    echo "👉 Bước tiếp theo — Trên Pi chạy:"
-    echo "   sudo ip addr add ${PI_IP_ETH}/24 dev eth0"
-    echo "   sudo ip link set eth0 up"
-    echo "   export ROS_DOMAIN_ID=42"
-    echo "   export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"
-    echo ""
-    echo "👉 Test kết nối:"
-    echo "   ping ${PI_IP_ETH}"
+    if ping -c 1 -W 1 "${PI_IP_ETH}" &>/dev/null; then
+        echo "📡 Đã thấy Raspberry Pi (${PI_IP_ETH})! Đang tự động cấu hình CycloneDDS trên Pi..."
+        ssh -o ConnectTimeout=3 "${PI_USER:-bao}@${PI_IP_ETH}" "
+cat > ~/robot_ws/cyclonedds.xml <<'EOF'
+<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<CycloneDDS xmlns=\"https://cdds.io/config\">
+  <Domain>
+    <General>
+      <Interfaces>
+        <NetworkInterface address=\"192.168.10.2\" />
+      </Interfaces>
+      <AllowMulticast>false</AllowMulticast>
+      <MaxMessageSize>65500B</MaxMessageSize>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <MaxAutoParticipantIndex>100</MaxAutoParticipantIndex>
+      <Peers>
+        <Peer address=\"192.168.10.1\"/>
+        <Peer address=\"192.168.10.2\"/>
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>
+EOF
+cp -f ~/robot_ws/cyclonedds.xml ~/.cyclonedds.xml
+" 2>/dev/null && echo "✅ Đã tự động cấu hình xong trên Pi!" || true
+    else
+        echo "👉 Nếu Pi chưa kết nối, hãy cắm cáp LAN rồi chạy trên Pi lệnh:"
+        echo "   sudo ip addr add ${PI_IP_ETH}/24 dev eth0 2>/dev/null || true; sudo ip link set eth0 up"
+    fi
 }
 alias setup-eth-direct="setup_eth_direct_func"
 alias ket-noi-cap="setup_eth_direct_func"
@@ -1163,7 +1290,9 @@ cat << 'EOF'
   real-record [tên]  : BẬT XE THẬT + QUAY VIDEO THÔ (100% Raw, lưu MP4 vào Pi)
   real-cnn           : BẬT XE THẬT TỰ HÀNH BÁM LUỐNG BẰNG AI CNN (Tự động lưu toàn bộ log & góc lái)
   chay-xe (bat-xe)   : Gửi lệnh xuất phát cho xe chạy (nếu không bấm 2D Goal Pose trên RViz)
-  xem-lai (xem-log)  : Xem báo cáo phân tích góc lái, tốc độ, độ tin cậy AI của lần chạy gần nhất
+  lich-su (nhat-ky)  : SỔ NHẬT KÝ THEO DÕI TOÀN BỘ CÁC LẦN CHẠY XE (Quãng đường, AI %, Omega Turn)
+  xem-lai (xem-log)  : Xem báo cáo phân tích chi tiết của lần chạy gần nhất
+  plot-lai           : Vẽ đồ thị phân tích quỹ đạo và góc lái lần chạy gần nhất
   tail-log           : Xem luồng log terminal thời gian thực của real-cnn
   mo-log             : Liệt kê toàn bộ các file log CSV & Text trong robot_ws/logs/
   real-slam          : Bật Xe Thật + SLAM Toolbox vẽ bản đồ

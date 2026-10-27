@@ -118,8 +118,8 @@ def main():
     node = rclpy.create_node('teleop_keyboard_node')
     pub = node.create_publisher(Twist, '/cmd_vel', 10)
 
-    linear_speed = 0.35   # m/s (Tốc độ tuyến tính phù hợp mô-men xoắn động cơ 775 có hộp số)
-    angular_speed = 0.80  # rad/s
+    linear_speed = 0.07   # m/s (Tốc độ chuẩn 7 cm/s cho động cơ 775 có hộp số)
+    angular_speed = 0.25  # rad/s (Góc xoay êm, không vọt bánh)
 
     target_x = 0.0
     target_th = 0.0
@@ -150,9 +150,9 @@ def main():
 
             elif key in SPEED_BINDINGS:
                 factor = SPEED_BINDINGS[key]
-                linear_speed = round(max(0.05, min(1.20, linear_speed * factor)), 2)
-                angular_speed = round(max(0.10, min(2.50, angular_speed * factor)), 2)
-                print(f"\n⚡ [TỐC ĐỘ MỚI] Dài: {linear_speed:.2f} m/s | Góc: {angular_speed:.2f} rad/s")
+                linear_speed = round(max(0.03, min(0.50, linear_speed * factor)), 3)
+                angular_speed = round(max(0.08, min(1.20, angular_speed * factor)), 2)
+                print(f"\n⚡ [TỐC ĐỘ MỚI] Dài: {linear_speed:.3f} m/s | Góc: {angular_speed:.2f} rad/s")
 
             elif key == '\x03':  # Ctrl+C
                 break

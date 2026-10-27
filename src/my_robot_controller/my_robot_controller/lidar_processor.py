@@ -30,15 +30,15 @@ class LidarProcessor:
 
         obstacle_hits = 0
         for idx, r in enumerate(ranges):
-            if math.isnan(r) or math.isinf(r) or r < 0.12 or r > effective_max_dist:
+            if math.isnan(r) or math.isinf(r) or r < 0.17 or r > effective_max_dist:
                 continue
 
             angle = angle_min + idx * angle_increment
             x_fwd = r * math.cos(angle)
             y_lat = r * math.sin(angle)
             
-            # Kiểm tra vật cản nằm trực diện trong hành lang tim xe
-            if 0.12 < x_fwd <= effective_max_dist and abs(y_lat) <= corridor_lat:
+            # Kiểm tra vật cản nằm trực diện trong hành lang tim xe (ngoài mũi xe > 0.17m)
+            if 0.17 < x_fwd <= effective_max_dist and abs(y_lat) <= corridor_lat:
                 obstacle_hits += 1
                 if obstacle_hits >= 3:  # Cần ít nhất 3 tia LiDAR liên tiếp để loại bỏ nhiễu bụi/ngọn cỏ
                     return True
@@ -84,7 +84,8 @@ class LidarProcessor:
 
         min_dist = float('inf')
         for idx, r in enumerate(ranges):
-            if math.isnan(r) or math.isinf(r) or r < 0.08:
+            # Lọc bỏ nhiễu và phần thân xe / cột camera gắn trước mũi LiDAR (< 0.17m)
+            if math.isnan(r) or math.isinf(r) or r < 0.17:
                 continue
             angle = angle_min + idx * angle_increment
             if min_rad <= angle <= max_rad:
@@ -106,12 +107,13 @@ class LidarProcessor:
         
         y_pts = []
         for idx, r in enumerate(ranges):
-            if math.isnan(r) or math.isinf(r) or r < 0.08 or r > max_dist:
+            # Lọc bỏ thân xe / cột camera (< 0.17m)
+            if math.isnan(r) or math.isinf(r) or r < 0.17 or r > max_dist:
                 continue
             angle = angle_min + idx * angle_increment
             x_fwd = r * math.cos(angle)
             y_lat = r * math.sin(angle)
-            if 0.08 < x_fwd < max_dist and abs(y_lat) <= robot_half_width:
+            if 0.17 < x_fwd < max_dist and abs(y_lat) <= robot_half_width:
                 y_pts.append(y_lat)
         if len(y_pts) > 0:
             return float(sum(y_pts) / len(y_pts))

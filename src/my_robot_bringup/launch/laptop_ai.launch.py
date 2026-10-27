@@ -51,6 +51,10 @@ def generate_launch_description():
         'enable_gps', default_value='true',
         description='Kích hoạt đo trượt Doppler và đánh giá quay đầu Omega Turn bằng GPS'
     )
+    enable_depth_arg = DeclareLaunchArgument(
+        'enable_depth', default_value='true',
+        description='Kích hoạt luồng chiều sâu Depth Map song song (RealSense D435)'
+    )
 
     # ── 1. Camera Publisher (Chạy trên Laptop, đọc USB RealSense D435 / iPhone) ──
     camera_publisher_node = Node(
@@ -64,6 +68,7 @@ def generate_launch_description():
             'width': LaunchConfiguration('width'),
             'height': LaunchConfiguration('height'),
             'fps': LaunchConfiguration('fps'),
+            'enable_depth': LaunchConfiguration('enable_depth'),
         }]
     )
 
@@ -77,6 +82,7 @@ def generate_launch_description():
             params_file,
             {
                 'image_topic': '/camera/color/image_raw',
+                'depth_topic': '/camera/depth/image_raw',
                 'odom_topic': '/odometry/filtered',
                 'scan_topic': '/scan',
                 'cmd_vel_topic': '/cmd_vel',
@@ -93,6 +99,7 @@ def generate_launch_description():
         height_arg,
         fps_arg,
         enable_gps_arg,
+        enable_depth_arg,
         camera_publisher_node,
         cnn_driver_node,
     ])

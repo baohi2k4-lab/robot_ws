@@ -34,6 +34,7 @@ setup(
             'video_recorder = my_robot_bringup.video_recorder:main',
             'camera_recorder = my_robot_bringup.camera_recorder:main',
             'camera_publisher = my_robot_bringup.camera_publisher:main',
+            'laser_filter = my_robot_bringup.laser_filter:main',
         ],
     },
 )

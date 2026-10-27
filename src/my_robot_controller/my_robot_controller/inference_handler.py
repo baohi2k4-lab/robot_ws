@@ -8,7 +8,7 @@ class InferenceHandler:
         self,
         model_path: str,
         mask_threshold: float = 0.35,
-        input_size: tuple[int, int] = (512, 512),
+        input_size: tuple[int, int] = (384, 384),
         use_hsv_mask: bool = False,
         num_threads: int = 0
     ):
@@ -65,25 +65,35 @@ class InferenceHandler:
         self.output_names = [self.session.get_outputs()[0].name]
 
     def preprocess_image(self, bgr_image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Converts BGR image to normalized RGB tensor using pre-allocated buffer."""
-        rgb = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2RGB)
-        resized = cv2.resize(rgb, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_LINEAR)
-        float_img = resized.astype(np.float32) * self._scale_inv_255
+        """Converts BGR image to normalized 384x384 RGB tensor [0.0, 1.0] matching crop_row_cnn_best.onnx."""
+        resized_bgr = cv2.resize(bgr_image, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
+        float_img = rgb.astype(np.float32) * self._scale_inv_255
         self._input_buffer[0] = np.transpose(float_img, (2, 0, 1))
         return self._input_buffer, rgb
 
     def predict_mask(self, input_tensor: np.ndarray, enable_tta: bool = False) -> np.ndarray:
-        """Runs model inference and applies numerically stable Sigmoid to get probability mask."""
+        """Runs model inference and returns probability mask [0.0, 1.0] (supports embedded Sigmoid or raw logits)."""
         ort_outs = self.session.run(self.output_names, {self.input_name: input_tensor})
-        logits = ort_outs[0][0, 0]   # (H, W)
-        # Fast numerically stable Sigmoid
-        probs = 1.0 / (1.0 + np.exp(-np.clip(logits, -20.0, 20.0)))
+        raw_out = ort_outs[0]
+        out_2d = raw_out[0, 0] if raw_out.ndim == 4 else np.squeeze(raw_out)
+
+        # crop_row_cnn_best.onnx đã nhúng sẵn Sigmoid ở đầu ra [0.0, 1.0].
+        # Chỉ áp dụng Sigmoid nếu mô hình trả về logits ngoài đoạn [0.0, 1.0], tránh lỗi Double-Sigmoid!
+        if out_2d.min() >= -1e-4 and out_2d.max() <= 1.0001:
+            probs = np.clip(out_2d, 0.0, 1.0)
+        else:
+            probs = 1.0 / (1.0 + np.exp(-np.clip(out_2d, -20.0, 20.0)))
 
         if enable_tta:
             input_tensor_flip = np.flip(input_tensor, axis=3)
             ort_outs_flip = self.session.run(self.output_names, {self.input_name: input_tensor_flip})
-            logits_flip = ort_outs_flip[0][0, 0]
-            probs_flip = 1.0 / (1.0 + np.exp(-np.clip(logits_flip, -20.0, 20.0)))
+            raw_flip = ort_outs_flip[0]
+            out_flip = raw_flip[0, 0] if raw_flip.ndim == 4 else np.squeeze(raw_flip)
+            if out_flip.min() >= -1e-4 and out_flip.max() <= 1.0001:
+                probs_flip = np.clip(out_flip, 0.0, 1.0)
+            else:
+                probs_flip = 1.0 / (1.0 + np.exp(-np.clip(out_flip, -20.0, 20.0)))
             probs_flip = np.flip(probs_flip, axis=1)
             probs = 0.5 * (probs + probs_flip)
 
@@ -135,18 +145,16 @@ class InferenceHandler:
             diffs = np.diff(np.pad(row.astype(np.int16), (1, 1), 'constant', constant_values=1))
             starts = np.where(diffs == -1)[0]
             ends = np.where(diffs == 1)[0] - 1
-            valid = (starts > 0) & (ends < w - 1)
-            if np.any(valid):
-                widths = ends[valid] - starts[valid] + 1
-                # Bắt buộc bề rộng khoảng trống phải >= min_lane_width (loại bỏ khe hở nhiễu)
-                valid_w = valid & (widths >= min_lane_width)
-                if np.any(valid_w):
-                    v_starts = starts[valid_w]
-                    v_ends = ends[valid_w]
-                    centers_x = (v_starts + v_ends) * 0.5
-                    dists = np.abs(centers_x - image_center)
-                    best_idx = np.argmin(dists)
-                    centers.append(float(centers_x[best_idx]))
+            widths = ends - starts + 1
+            # Bắt buộc khoảng trống nằm giữa 2 cụm hàng và có bề rộng >= min_lane_width (loại bỏ khe hở nhiễu)
+            valid_w = (starts > 0) & (ends < w - 1) & (widths >= min_lane_width)
+            if np.any(valid_w):
+                v_starts = starts[valid_w]
+                v_ends = ends[valid_w]
+                centers_x = (v_starts + v_ends) * 0.5
+                dists = np.abs(centers_x - image_center)
+                best_idx = np.argmin(dists)
+                centers.append(float(centers_x[best_idx]))
 
         # Cần ít nhất 5 hàng quét tìm thấy lối đi 2 bên mới coi là tìm thấy luống hoàn chỉnh
         if len(centers) >= 5:
@@ -373,15 +381,16 @@ class InferenceHandler:
         confidence = float(np.clip(row_score, 0.0, 1.0))
 
         # Hỗ trợ bám 1 hàng (Single-Row Confidence):
-        # Nếu chưa đủ 2 hàng (confidence thấp) nhưng có 1 hàng cây/thùng rõ nét (diện tích lớn)
+        # Nếu chỉ thấy 1 vạch hàng cây/thùng (chưa đủ 2 hàng hai bên), cấp confidence trong dải 0.32 ~ 0.38
+        # để xe vẫn duy trì bám luống (>= low_confidence_threshold 0.30) nhưng KHÔNG vượt ngưỡng 0.45
+        # của pha khóa 2 hàng miệng Luống 2 (TURN_90_INTO_ROW2).
         if confidence < 0.35:
             area_scale = (h * w) / (512.0 * 512.0)
-            min_single_area = max(100, int(600 * area_scale))
+            min_single_area = max(80, int(450 * area_scale))
             num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_closed)
             max_area = max([stats[i, cv2.CC_STAT_AREA] for i in range(1, num_labels)], default=0)
             if max_area >= min_single_area:
-                # 1 hàng rất rõ nét -> Đạt mức confidence 0.45 ~ 0.65 (Bám 1 hàng an toàn không bị skip-zero)
-                single_score = min(0.65, 0.42 + (max_area / max(1.0, 6000.0 * area_scale)) * 0.23)
+                single_score = min(0.38, 0.32 + (max_area / max(1.0, 3000.0 * area_scale)) * 0.06)
                 confidence = max(confidence, single_score)
 
         return confidence

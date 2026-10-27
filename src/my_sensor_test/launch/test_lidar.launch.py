@@ -71,6 +71,26 @@ def generate_launch_description():
             'inverted': False,
             'angle_compensate': True,
             'scan_mode': 'Standard',
+        }],
+        remappings=[
+            ('scan', '/scan_raw'),
+        ]
+    )
+
+    # Laser Filter Node (Filters pillar & chassis blind spot)
+    laser_filter_node = Node(
+        package='my_robot_bringup',
+        executable='laser_filter',
+        name='laser_filter_node',
+        output='screen',
+        parameters=[{
+            'input_topic': '/scan_raw',
+            'output_topic': '/scan',
+            'min_distance': 0.18,
+            'max_distance': 12.0,
+            'filter_rear_cone': True,
+            'rear_angle_deg': 30.0,
+            'rear_dist_limit': 0.35,
         }]
     )
 
@@ -100,6 +120,7 @@ def generate_launch_description():
         robot_state_pub,
         joint_state_pub,
         lidar_node,
+        laser_filter_node,
         visualizer_node,
         rviz2_node,
     ])

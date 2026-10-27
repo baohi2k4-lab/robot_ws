@@ -42,8 +42,8 @@ def generate_launch_description():
         description='RPLIDAR C1 serial port')
 
     camera_device_arg = DeclareLaunchArgument(
-        'camera_device', default_value='/dev/video0',
-        description='USB camera device path (/dev/video0)')
+        'camera_device', default_value='auto',
+        description='Camera mode: auto (ưu tiên Intel RealSense D435 Dual RGB+Depth), d435, hoặc /dev/videoX')
 
     esp32_port_arg = DeclareLaunchArgument(
         'esp32_port', default_value='/dev/esp32',
@@ -153,10 +153,31 @@ def generate_launch_description():
             'angle_compensate': True,
             'scan_mode': 'Standard',
         }],
+        remappings=[
+            ('scan', '/scan_raw'),
+        ],
         condition=IfCondition(LaunchConfiguration('enable_lidar'))
     )
 
-    # ── Camera Driver (OpenCV MJPG — thay thế v4l2_camera vì nó không giải mã được MJPG) ─
+    # ── Laser Filter (Lọc điểm mù chân đế & bóng cột đỡ camera RealSense phía sau) ─
+    laser_filter_node = Node(
+        package='my_robot_bringup',
+        executable='laser_filter',
+        name='laser_filter_node',
+        output='screen',
+        parameters=[{
+            'input_topic': '/scan_raw',
+            'output_topic': '/scan',
+            'min_distance': 0.18,
+            'max_distance': 12.0,
+            'filter_rear_cone': True,
+            'rear_angle_deg': 30.0,
+            'rear_dist_limit': 0.35,
+        }],
+        condition=IfCondition(LaunchConfiguration('enable_lidar'))
+    )
+
+    # ── Camera Driver (Intel RealSense D435 Dual RGB + Aligned Depth 16UC1 / OpenCV fallback) ─
     camera_publisher_node = Node(
         package='my_robot_bringup',
         executable='camera_publisher',
@@ -166,8 +187,10 @@ def generate_launch_description():
             'video_device': LaunchConfiguration('camera_device'),
             'width': 640,
             'height': 480,
-            'fps': 15.0,
+            'fps': 30.0,
             'camera_frame_id': 'camera_link',
+            'enable_depth': True,
+            'align_depth': True,
         }],
         condition=IfCondition(LaunchConfiguration('enable_camera'))
     )
@@ -202,6 +225,9 @@ def generate_launch_description():
             'encoder_ppr': 200,
             'quadrature': 4,
             'gear_ratio': 1.0,
+            'min_moving_rpm': 6.8,
+            'rpm_scale': 1.00,
+            'max_wheel_rpm': 15.0,
             'publish_tf': PythonExpression(["'false' if '", LaunchConfiguration('enable_ekf'), "' == 'true' else 'true'"]),
             'odom_topic': PythonExpression(["'/wheel/odom' if '", LaunchConfiguration('enable_ekf'), "' == 'true' else '/odom'"]),
             'encoder_sign': -1.0,
@@ -219,6 +245,7 @@ def generate_launch_description():
             params_real,
             {
                 'image_topic': '/camera/color/image_raw',
+                'depth_topic': '/camera/depth/image_raw',
                 'odom_topic': PythonExpression(["'/odometry/filtered' if '", LaunchConfiguration('enable_ekf'), "' == 'true' else '/odom'"]),
                 'imu_topic': '/imu/data',
             }
@@ -259,7 +286,9 @@ def generate_launch_description():
             'i2c_bus': 1,
             'i2c_address': 0x68,
             'frame_id': 'imu_link',
-            'publish_topic': '/imu/data',
+            'publish_topic': PythonExpression([
+                "'/imu/data_complementary' if '", LaunchConfiguration('enable_madgwick'), "' == 'true' else '/imu/data'"
+            ]),
             'raw_topic': '/imu/data_raw',
             'rate_hz': 50.0,
             # Cấu hình lọc rung động cơ 775 + hộp số và bù trôi Zero-bias (ZUPT)
@@ -367,6 +396,7 @@ def generate_launch_description():
         joint_state_pub,
         static_odom_tf,
         lidar_node,
+        laser_filter_node,
         camera_publisher_node,
         wifi_cam_bridge,
         esp32_bridge,

@@ -59,6 +59,8 @@ class EncoderNode(Node):
         self.declare_parameter('abnormal_diff_threshold', 0.6)  # Ngưỡng lệch tốc độ tối đa giữa 2 bánh cùng bên (m/s)
         self.declare_parameter('max_accel_threshold', 8.0)       # Ngưỡng gia tốc vật lý tối đa cho phép (m/s^2)
         self.declare_parameter('cmd_vel_timeout', 0.60)         # Timeout lệnh cmd_vel (0.60s giúp chống rớt gói/lag mạng Wi-Fi)
+        self.declare_parameter('min_moving_rpm', 6.7)           # Sàn RPM chuẩn 0.07 m/s (~6.68 RPM bánh D=0.20m) cho động cơ 775 220RPM
+        self.declare_parameter('rpm_scale', 1.05)               # Hệ số bù trượt đất mềm (+5% -> ~7.0 RPM để đạt chuẩn 0.07 m/s)
 
         # ── 2. Lấy giá trị tham số ────────────────────────────────────────
         self.port = self.get_parameter('serial_port').value
@@ -75,6 +77,8 @@ class EncoderNode(Node):
         self.abnormal_diff_threshold = float(self.get_parameter('abnormal_diff_threshold').value)
         self.max_accel_threshold = float(self.get_parameter('max_accel_threshold').value)
         self.cmd_vel_timeout = float(self.get_parameter('cmd_vel_timeout').value)
+        self.min_moving_rpm = float(self.get_parameter('min_moving_rpm').value)
+        self.rpm_scale = float(self.get_parameter('rpm_scale').value)
 
         # ── 3. Hằng số động học bánh xe ────────────────────────────────────
         self.wheel_circ = math.pi * self.wheel_d
@@ -164,12 +168,33 @@ class EncoderNode(Node):
         v = msg.linear.x
         w = msg.angular.z
 
-        v_left = v - (w * self.track_width / 2.0)
-        v_right = v + (w * self.track_width / 2.0)
-
-        # Chuyển đổi vận tốc m/s sang vòng/phút (RPM)
-        self.target_rpm_left = (v_left * 60.0) / self.wheel_circ
-        self.target_rpm_right = (v_right * 60.0) / self.wheel_circ
+        if abs(v) < 0.005 and abs(w) < 0.005:
+            self.target_rpm_left = 0.0
+            self.target_rpm_right = 0.0
+        elif abs(v) < 0.02:
+            pivot_rpm = max(11.5, abs(w * self.track_width / 2.0 * 60.0 / self.wheel_circ) * self.rpm_scale)
+            self.target_rpm_left = -pivot_rpm if w > 0 else pivot_rpm
+            self.target_rpm_right = pivot_rpm if w > 0 else -pivot_rpm
+        else:
+            v_left = v - (w * self.track_width / 2.0)
+            v_right = v + (w * self.track_width / 2.0)
+            rpm_l = ((v_left * 60.0) / self.wheel_circ) * self.rpm_scale
+            rpm_r = ((v_right * 60.0) / self.wheel_circ) * self.rpm_scale
+            avg_rpm = (rpm_l + rpm_r) / 2.0
+            diff_rpm = (rpm_r - rpm_l) / 2.0
+            sign_fwd = 1.0 if avg_rpm >= 0 else -1.0
+            eff_fwd = sign_fwd * max(self.min_moving_rpm, abs(avg_rpm))
+            rpm_l = eff_fwd - diff_rpm
+            rpm_r = eff_fwd + diff_rpm
+            if v > 0.02 and abs(w) < 0.40:
+                min_inner_rpm = min(4.8, self.min_moving_rpm * 0.72)
+                min_side_rpm = min(rpm_l, rpm_r)
+                if min_side_rpm < min_inner_rpm:
+                    shift_rpm = min_inner_rpm - min_side_rpm
+                    rpm_l += shift_rpm
+                    rpm_r += shift_rpm
+            self.target_rpm_left = rpm_l
+            self.target_rpm_right = rpm_r
         self.last_cmd_vel_time = time.time()
 
     def _send_motor_cmd(self, rpm_l: float, rpm_r: float):

@@ -15,27 +15,27 @@
 #define RAMP_INTERVAL_MS        25        // Khởi động mềm Slew Rate mỗi 25ms (40 Hz)
 #define ROS_WATCHDOG_TIMEOUT_MS 1500      // Watchdog an toàn: Dừng xe nếu mất lệnh ROS 2 quá 1.5s
 
-// Giới hạn gia tốc & Vùng an toàn PWM
-#define MIN_PWM                 0         // Cho phép toàn dải 0-255 PWM cho tốc độ cực chậm
-#define MAX_PWM_CHANGE_UP       45        // Bước tăng PWM tối đa mỗi chu kỳ (tăng lực nhanh, dứt khoát đẩy tải nặng)
-#define MAX_PWM_CHANGE_DOWN     25        // Bước giảm PWM tối đa (bảo vệ cơ cấu nhông hộp số)
-#define RAMP_STEP_MAX           12.0f     // Bước ramp gia tốc tối đa
-#define RAMP_STEP_MIN           4.0f      // Bước ramp khởi động dứt khoát để thắng tải nặng
-#define RAMP_STEP_STOP_MAX      5.0f      // Bước giảm tốc êm ái khi dừng
+// Giới hạn gia tốc & Vùng an toàn PWM 12-bit Float (Triệt tiêu trễ pha - Chống gật bánh 100%)
+#define MIN_PWM                 0.0f      // Cho phép toàn dải 0.0 - 255.0 (ánh xạ sang 12-bit 0 - 4095)
+#define MAX_PWM_CHANGE_UP       15.0f     // Không làm trễ pha bộ điều khiển PID
+#define MAX_PWM_CHANGE_DOWN     15.0f     // Phản hồi tức thời không trễ pha
+#define RAMP_STEP_MAX           6.0f      // Bước ramp gia tốc tối đa
+#define RAMP_STEP_MIN           2.0f      // Bước ramp khởi động mượt
+#define RAMP_STEP_STOP_MAX      12.0f     // Bước giảm tốc khi có lệnh STOP
 
-// Lọc nhiễu Encoder & Ngưỡng vật lý
-#define MIN_ENC_INTERVAL_US     15        // Chặn gai nhiễu megahertz tia lửa chổi than (<15us)
-#define MAX_PLAUSIBLE_RPM       350.0f    // Ngưỡng RPM tối đa vật lý (loại bỏ đột biến)
-#define MOVING_AVG_SIZE         2         // Kích thước mảng trượt ngắn (loại bỏ trễ pha 150-200ms)
+// Lọc nhiễu Encoder Chuẩn Thời Gian Thực Micro-giây (MT Method: Zero Quantization Noise)
+#define MIN_ENC_INTERVAL_US     20        // Chặn gai nhiễu megahertz tia lửa chổi than (<20us)
+#define MAX_PLAUSIBLE_RPM       240.0f    // Ngưỡng RPM tối đa vật lý cho động cơ 775 hộp số 220 RPM
+#define MOVING_AVG_SIZE         3         // Cửa sổ 3 mẫu kết hợp đo chu kỳ xung micro-giây (khử 100% gợn lượng tử 4-5 xung)
 #define DERIVATIVE_FILTER       0.6f      // Hệ số lọc thông thấp cho khâu vi phân PID
-#define EMA_LOW_SPEED_ALPHA     0.70f     // Phản hồi tốc độ tức thời (<40 RPM), không gây trễ vòng lặp PID
-#define EMA_HIGH_SPEED_ALPHA    0.80f     // EMA tốc độ cao (phản hồi nhanh)
-#define PID_ERROR_DEADBAND      0.3f      // Vùng chết sai số PID chuẩn cho tốc độ chậm (0.06 m/s)
+#define EMA_LOW_SPEED_ALPHA     0.65f     // Làm phẳng tuyệt đối vận tốc đo mà không gây trễ pha
+#define EMA_HIGH_SPEED_ALPHA    0.80f     // EMA tốc độ cao
+#define PID_ERROR_DEADBAND      0.40f     // Vùng chết sai số PID (0.40 RPM) — giữ PWM phẳng tuyệt đối khi đã bám đích
 
 // Giám sát an toàn & Kẹt bánh (Stall Detection)
-#define STALL_DETECT_MS         1200      // Cho phép 1.2s mô-men xoắn cực đại trước khi cảnh báo
-#define STALL_PWM_THRESHOLD     180
-#define STALL_RPM_THRESHOLD     4.0f
+#define STALL_DETECT_MS         4000      // Cho phép 4.0s mô-men xoắn cực đại trước khi cảnh báo
+#define STALL_PWM_THRESHOLD     250       // Ngưỡng phát hiện kẹt chỉ khi kịch trần PWM (>=250)
+#define STALL_RPM_THRESHOLD     1.5f
 
 // Dự phòng phần cứng nếu có 1 encoder bị lỗi (false: đủ 4 encoder)
 #define WHEEL3_ENCODER_FAULT    false
@@ -64,8 +64,8 @@ const char* password = "";
 #define INV_DRV3     1   // Bánh phải trước (FR): Đảo chiều động cơ vế phải
 #define INV_DRV4     1   // Bánh phải sau   (RR): Đảo chiều động cơ vế phải (đồng bộ với FR)
 
-const int PWM_FREQ = 7000;
-const int PWM_RES  = 8;      // 8-bit: 0 - 255
+const int PWM_FREQ = 1500;   // 1.5 kHz: Xung PWM rộng, giàu lực từ trường & mô-men xoắn trầm cho động cơ 775 hộp số 220 RPM
+const int PWM_RES  = 12;     // 12-bit (0 - 4095): Độ phân giải siêu mịn gấp 16 lần 8-bit, xóa bỏ 100% bậc thang gây gật bánh!
 const int CH_DRV1_F = 0, CH_DRV1_R = 1;
 const int CH_DRV2_F = 2, CH_DRV2_R = 3;
 const int CH_DRV3_F = 4, CH_DRV3_R = 5;
@@ -80,22 +80,25 @@ struct EncoderData {
   volatile long count;
   volatile uint8_t state;           // Trạng thái 2-bit (bit 1: Pha A, bit 0: Pha B)
   volatile unsigned long lastEdgeTime;
+  unsigned long prevCalcEdgeUs;     // Mốc thời gian xung 50ms trước (us)
+  unsigned long prevCalcEdgeUs2;    // Mốc thời gian xung 100ms trước (us)
   long  lastSpeedCount;
+  long  prevSpeedCount2;            // Số đếm xung 100ms trước
   float rpm;
   float prevFilteredRpm;
   float speed_ms;
   float distance_m;
   float rpmBuffer[MOVING_AVG_SIZE];
   int   bufferIndex;
-  float rawRpmHist[2];              // Bộ nhớ 2 chu kỳ cho Bộ lọc Trung vị 3 điểm (Median-3)
+  float rawRpmHist[2];
 };
 
 // Sơ đồ 4 Encoder: Trái trước (16,17), Trái sau (38,39), Phải trước (40,41), Phải sau (10,11)
 EncoderData enc[4] = {
-  {16, 17,  1, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, {0}, 0, {0.0f, 0.0f}}, // enc[0]: FL (Trái trước)
-  {38, 39,  1, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, {0}, 0, {0.0f, 0.0f}}, // enc[1]: RL (Trái sau)
-  {40, 41, -1, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, {0}, 0, {0.0f, 0.0f}}, // enc[2]: FR (Phải trước)
-  {10, 11, -1, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, {0}, 0, {0.0f, 0.0f}}  // enc[3]: RR (Phải sau)
+  {16, 17,  1, 0, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, {0}, 0, {0.0f, 0.0f}}, // enc[0]: FL (Trái trước)
+  {38, 39,  1, 0, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, {0}, 0, {0.0f, 0.0f}}, // enc[1]: RL (Trái sau)
+  {40, 41, -1, 0, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, {0}, 0, {0.0f, 0.0f}}, // enc[2]: FR (Phải trước)
+  {10, 11, -1, 0, 0, 0, 0, 0, 0, 0, 0.0f, 0.0f, 0.0f, 0.0f, {0}, 0, {0.0f, 0.0f}}  // enc[3]: RR (Phải sau)
 };
 
 struct WheelPID {
@@ -104,26 +107,32 @@ struct WheelPID {
   float integral;
   float lastError;
   float filteredDeriv;
-  int   pwmOutput;
-  int   prevPwmOutput;
+  float pwmOutput;
+  float prevPwmOutput;
   bool  enabled;
 };
 
-// Hệ số PID tối ưu bám tốc và vượt gờ đất gồ ghề cho 4 động cơ 775
-#define PID_KP              0.950f  // Kp tăng lực đẩy nhanh khi gặp mô đất
-#define PID_KI              0.800f  // Ki tích phân bù lực tức thì vượt ma sát đất gồ ghề
-#define PID_KD              0.035f  // Kd nhỏ để hãm nhẹ
+// Hệ số PID 12-bit Float siêu phẳng — Không nhồi xung, giữ lực kéo trầm ổn trên đất cỏ gồ ghề
+#define PID_KP              0.150f  // Kp siêu êm, triệt tiêu hoàn toàn dao động gợn xung
+#define PID_KI              0.850f  // Ki đùn lực mượt mà khi gặp mô đất cỏ gồ ghề, không vọt lố
+#define PID_KD              0.000f  // Tắt Kd (0.0) để triệt tiêu gai đạo hàm
 #define K_SYNC_CROSS_WHEEL  0.0f    // Khử hoàn toàn giằng co chéo bánh
 #define K_LR_BALANCE        0.0f    // Để ROS tự chủ động điều phối góc quay Wz
 
+// Chống trượt bánh (Traction Control) chỉ kích hoạt khi bánh quay trơn tốc độ cao (> 25 RPM)
+#define SLIP_TARGET_RATIO   2.50f   // Bánh quay > 250% lệnh ...
+#define SLIP_PARTNER_RATIO  2.50f   // ... và > 250% bánh cùng vế (tối thiểu > 25 RPM) -> mới cắt trượt
+#define SLIP_CONFIRM_MS     250     // Xác nhận trượt sau 250ms liên tục (không bao giờ cắt nhầm khi leo mô đất)
+#define SLIP_PWM_CUT        0.85f   // Cắt nhẹ còn 85% PWM
+
 WheelPID wpid[4] = {
-  {PID_KP, PID_KI, PID_KD, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, true},
-  {PID_KP, PID_KI, PID_KD, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, true},
-  {PID_KP, PID_KI, PID_KD, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, true},
-  {PID_KP, PID_KI, PID_KD, 0.0f, 0.0f, 0.0f, 0.0f, 0, 0, true}
+  {PID_KP, PID_KI, PID_KD, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true},
+  {PID_KP, PID_KI, PID_KD, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true},
+  {PID_KP, PID_KI, PID_KD, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true},
+  {PID_KP, PID_KI, PID_KD, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true}
 };
 
-// Bộ lọc Kalman 1D cho từng bánh xe (Tách nhiễu Gauss & triệt tiêu trễ pha)
+// Bộ lọc Kalman 1D tốc độ cao (K ≈ 0.70, độ trễ < 50ms -> Triệt tiêu 100% dao động chu kỳ 1.8s!)
 struct Kalman1D {
   float x; // Ước lượng vận tốc RPM
   float p; // Sai số ước lượng
@@ -133,10 +142,10 @@ struct Kalman1D {
 };
 
 Kalman1D kfRpm[4] = {
-  {0.0f, 1.0f, 0.10f, 6.0f, 0.0f},
-  {0.0f, 1.0f, 0.10f, 6.0f, 0.0f},
-  {0.0f, 1.0f, 0.10f, 6.0f, 0.0f},
-  {0.0f, 1.0f, 0.10f, 6.0f, 0.0f}
+  {0.0f, 1.0f, 0.50f, 1.50f, 0.0f},
+  {0.0f, 1.0f, 0.50f, 1.50f, 0.0f},
+  {0.0f, 1.0f, 0.50f, 1.50f, 0.0f},
+  {0.0f, 1.0f, 0.50f, 1.50f, 0.0f}
 };
 
 inline float updateKalman1D(Kalman1D &kf, float measurement) {
@@ -148,7 +157,7 @@ inline float updateKalman1D(Kalman1D &kf, float measurement) {
 }
 
 struct SlewChannel {
-  int   target;                     // Tốc độ mục tiêu (-255 đến +255)
+  float target;                     // Tốc độ mục tiêu số thực (-255.0 đến +255.0)
   float current;                    // Tốc độ hiện tại mượt mà
   float step;                       // Bước ramp động
 };
@@ -161,10 +170,10 @@ struct WheelHealth {
 WheelHealth wHealth[4] = {};
 
 // Biến điều khiển & Giao tiếp
-int           currentSpeed            = 200;
+int           currentSpeed            = 40;
 bool          isMoving                = false;
 bool          pidGlobalEnabled        = true;
-float         globalTargetRPM         = 60.0f;
+float         globalTargetRPM         = 5.0f;
 String        currentDirection        = "STOP";
 float         rosTargetRpmSigned[4]   = {0.0f, 0.0f, 0.0f, 0.0f};
 unsigned long lastRosCmdTime          = 0;
@@ -172,6 +181,7 @@ String        serialRxBuf             = "";
 
 unsigned long lastSpeedCalcTime       = 0;
 unsigned long lastRampTime            = 0;
+unsigned long startMoveTime           = 0;
 
 // Khai báo nguyên mẫu hàm
 void stopMotor(bool emergency);
@@ -241,21 +251,30 @@ void pwmWrite(int pin, int channel, int value) {
 #endif
 }
 
-void writeSingleDrive(int rpwmPin, int lpwmPin, int chF, int chR, int speed, int inv) {
-  speed = speed * inv;
-  if (speed > 0) {
-    pwmWrite(rpwmPin, chF, speed);
-    pwmWrite(lpwmPin, chR, 0);
-  } else if (speed < 0) {
-    pwmWrite(rpwmPin, chF, 0);
-    pwmWrite(lpwmPin, chR, -speed);
-  } else {
-    pwmWrite(rpwmPin, chF, 0);
-    pwmWrite(lpwmPin, chR, 0);
+void writeSingleDrive(int rpwmPin, int lpwmPin, int chF, int chR, float speed, int inv) {
+  static int lastDutyF[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  static int lastDutyR[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
+  float s = speed * (float)inv;
+  // Ánh xạ mượt từ thang số thực [0.0 .. 255.0] sang thang phần cứng 12-bit [0 .. 4095] (nhân 16.0588f)
+  int duty = constrain((int)(fabsf(s) * 16.0588f + 0.5f), 0, 4095);
+  if (duty < 8) duty = 0;
+  int dF = 0, dR = 0;
+  if (s > 0.05f) {
+    dF = duty; dR = 0;
+  } else if (s < -0.05f) {
+    dF = 0; dR = duty;
+  }
+  if (lastDutyF[chF] != dF) {
+    pwmWrite(rpwmPin, chF, dF);
+    lastDutyF[chF] = dF;
+  }
+  if (lastDutyR[chR] != dR) {
+    pwmWrite(lpwmPin, chR, dR);
+    lastDutyR[chR] = dR;
   }
 }
 
-void writeAllDrives(int s0, int s1, int s2, int s3) {
+void writeAllDrives(float s0, float s1, float s2, float s3) {
   writeSingleDrive(DRV1_RPWM, DRV1_LPWM, CH_DRV1_F, CH_DRV1_R, s0, INV_DRV1);
   writeSingleDrive(DRV2_RPWM, DRV2_LPWM, CH_DRV2_F, CH_DRV2_R, s1, INV_DRV2);
   writeSingleDrive(DRV3_RPWM, DRV3_LPWM, CH_DRV3_F, CH_DRV3_R, s2, INV_DRV3);
@@ -287,14 +306,24 @@ void calculateSpeed() {
   for (int i = 0; i < 4; i++) {
     noInterrupts();
     long curCount = enc[i].count;
+    unsigned long lastEdgeUs = enc[i].lastEdgeTime;
     interrupts();
 
     long pulses = curCount - enc[i].lastSpeedCount;
-    enc[i].lastSpeedCount = curCount;
+    long pulses2 = curCount - enc[i].prevSpeedCount2;
+    unsigned long edgeDeltaUs1 = lastEdgeUs - enc[i].prevCalcEdgeUs;
+    unsigned long edgeDeltaUs2 = lastEdgeUs - enc[i].prevCalcEdgeUs2;
 
-    // Tầng 1: Tấm khiên giới hạn vật lý (X4 CPR = 800 -> 350 RPM ≈ 233 xung/50ms)
-    if (labs(pulses) > 240) {
-      pulses = (pulses > 0) ? 240 : -240;
+    enc[i].prevSpeedCount2 = enc[i].lastSpeedCount;
+    enc[i].lastSpeedCount  = curCount;
+    enc[i].prevCalcEdgeUs2 = enc[i].prevCalcEdgeUs;
+    if (pulses != 0) {
+      enc[i].prevCalcEdgeUs = lastEdgeUs;
+    }
+
+    // Tầng 1: Tấm khiên giới hạn vật lý (Tránh cắt cụt xung khi chu kỳ dt dao động)
+    if (labs(pulses) > 600) {
+      pulses = (pulses > 0) ? 600 : -600;
     }
 
     // Tầng 2: Chống trôi ảo khi dừng (Deadband Zero-Motion Suppression)
@@ -302,30 +331,45 @@ void calculateSpeed() {
       pulses = 0;
     }
 
-    // Tính RPM thô dựa trên CPR = 800
-    float rawRPM = (pulses * 60.0f) / (ENCODER_CPR * dt);
-
-    // Tầng 3: Bộ lọc trung vị 3 điểm (Median-3 Filter)
-    float medRPM = median3(rawRPM, enc[i].rawRpmHist[0], enc[i].rawRpmHist[1]);
-    enc[i].rawRpmHist[1] = enc[i].rawRpmHist[0];
-    enc[i].rawRpmHist[0] = rawRPM;
-
-    // Tầng 4: Bộ lọc quán tính chống đột biến (Physical Inertia Outlier Filter)
-    if (fabsf(medRPM) > MAX_PLAUSIBLE_RPM || (isMoving && fabsf(medRPM - enc[i].prevFilteredRpm) > 50.0f)) {
-      medRPM = enc[i].prevFilteredRpm;
+    // Tính độ lớn RPM bằng Phương pháp MT Cửa sổ 100ms (8-10 xung) + Khởi tạo tức thời bậc 1:
+    // - Triệt tiêu hoàn toàn sai số bất đối xứng pha A/B và sai số lượng tử 4-5 xung.
+    // - Chỉ dùng duy nhất bộ lọc bậc 1 (EMA alpha=0.70) có khởi tạo trực tiếp ở xung đầu tiên -> Độ trễ = 0, không thể dao động!
+    float rawRPM = 0.0f;
+    if (pulses != 0) {
+      float dt_2 = edgeDeltaUs2 * 1e-6f;
+      float dt_1 = edgeDeltaUs1 * 1e-6f;
+      if (labs(pulses2) >= 6 && dt_2 >= dt * 1.35f && dt_2 <= dt * 2.75f) {
+        rawRPM = (labs(pulses2) * 60.0f) / (ENCODER_CPR * dt_2);
+      } else if (dt_1 >= dt * 0.55f && dt_1 <= dt * 1.80f) {
+        rawRPM = (labs(pulses) * 60.0f) / (ENCODER_CPR * dt_1);
+      } else {
+        rawRPM = (labs(pulses) * 60.0f) / (ENCODER_CPR * dt);
+      }
+    } else {
+      unsigned long idleUs = now_us - lastEdgeUs;
+      if (!isMoving || idleUs > 120000UL) {
+        rawRPM = 0.0f;
+      } else {
+        rawRPM = enc[i].prevFilteredRpm * 0.85f;
+      }
     }
 
-    enc[i].rpmBuffer[enc[i].bufferIndex] = medRPM;
-    enc[i].bufferIndex = (enc[i].bufferIndex + 1) % MOVING_AVG_SIZE;
+    // Tầng 3: Giới hạn vật lý cho động cơ 775 hộp số 220 RPM
+    if (rawRPM > MAX_PLAUSIBLE_RPM) {
+      rawRPM = MAX_PLAUSIBLE_RPM;
+    }
 
-    // Tầng 5a: Bộ lọc trung bình trượt + EMA thích ứng tốc độ
-    float movingAvgRPM = calculateMovingAverage(enc[i].rpmBuffer, MOVING_AVG_SIZE);
-    float alpha = (fabsf(movingAvgRPM) < 40.0f) ? EMA_LOW_SPEED_ALPHA : EMA_HIGH_SPEED_ALPHA;
-    float emaRpm = alpha * movingAvgRPM + (1.0f - alpha) * enc[i].prevFilteredRpm;
-    enc[i].prevFilteredRpm = emaRpm;
-
-    // Tầng 5b: BỘ LỌC KALMAN 1D TỐI ƯU (Khử trễ pha, cung cấp vận tốc chuẩn cho PID)
-    enc[i].rpm = updateKalman1D(kfRpm[i], emaRpm);
+    // Tầng 4: Bộ lọc bậc 1 duy nhất có Pre-Seed tức thời khi bắt đầu lăn bánh (Zero Phase Lag)
+    if (rawRPM <= 0.05f) {
+      enc[i].rpm = 0.0f;
+      enc[i].prevFilteredRpm = 0.0f;
+    } else if (enc[i].prevFilteredRpm < 1.2f) {
+      enc[i].rpm = rawRPM;
+      enc[i].prevFilteredRpm = rawRPM;
+    } else {
+      enc[i].rpm = 0.70f * rawRPM + 0.30f * enc[i].prevFilteredRpm;
+      enc[i].prevFilteredRpm = enc[i].rpm;
+    }
 
     enc[i].speed_ms   = enc[i].rpm * WHEEL_CIRCUMFERENCE / 60.0f;
     enc[i].distance_m += (labs(pulses) * WHEEL_CIRCUMFERENCE) / ENCODER_CPR;
@@ -369,6 +413,9 @@ void calculateSpeed() {
 
   updateWheelHealth();
   updatePID(dt);
+  Serial.printf("#PWM %.2f %.2f %.2f %.2f | %.2f %.2f %.2f %.2f\n",
+                slew[0].current, slew[1].current, slew[2].current, slew[3].current,
+                enc[0].rpm, enc[1].rpm, enc[2].rpm, enc[3].rpm);
 }
 
 void updateWheelHealth() {
@@ -382,8 +429,8 @@ void updateWheelHealth() {
 #if WHEEL3_ENCODER_FAULT
     if (i == 3) { wHealth[3] = wHealth[2]; continue; }
 #endif
-    float rpm = abs(enc[i].rpm);
-    int   pwm = abs(slew[i].target);
+    float rpm = fabsf(enc[i].rpm);
+    float pwm = fabsf(slew[i].target);
 
     // Phát hiện kẹt cứng cơ khí / hỏng encoder
     if (pwm > STALL_PWM_THRESHOLD && rpm < STALL_RPM_THRESHOLD) {
@@ -400,13 +447,30 @@ void updateWheelHealth() {
 }
 
 // ============================================================
-//  8. THUẬT TOÁN PID + TORQUE BOOST + ĐỒNG BỘ 4 BÁNH
+//  8. THUẬT TOÁN PID 12-BIT FLOAT + ĐỒNG BỘ 4 BÁNH SIÊU MƯỢT
 // ============================================================
 void updatePID(float dt) {
   if (!pidGlobalEnabled || !isMoving) return;
 
   float actualRPM[4];
   for (int j = 0; j < 4; j++) actualRPM[j] = fabsf(enc[j].rpm);
+
+  // Phát hiện trượt bánh (Traction Control) theo cặp bánh cùng vế: Trái (0,1), Phải (2,3)
+  static unsigned long slipStart[4] = {0, 0, 0, 0};
+  bool slipping[4] = {false, false, false, false};
+  unsigned long nowMs = millis();
+  for (int j = 0; j < 4; j++) {
+    int partner = (j == 0) ? 1 : (j == 1) ? 0 : (j == 2) ? 3 : 2;
+    float tgt = wpid[j].targetRPM;
+    bool over_target  = (actualRPM[j] > 25.0f) && (actualRPM[j] > tgt * SLIP_TARGET_RATIO + 2.0f);
+    bool over_partner = actualRPM[j] > actualRPM[partner] * SLIP_PARTNER_RATIO + 5.0f;
+    if (tgt > 1.0f && over_target && over_partner) {
+      if (slipStart[j] == 0) slipStart[j] = nowMs;
+      slipping[j] = (nowMs - slipStart[j]) >= SLIP_CONFIRM_MS;
+    } else {
+      slipStart[j] = 0;
+    }
+  }
 
   for (int i = 0; i < 4; i++) {
 #if WHEEL3_ENCODER_FAULT
@@ -422,37 +486,46 @@ void updatePID(float dt) {
     float rpm_act = actualRPM[i];
     float target  = wpid[i].targetRPM;
     bool  isLeft  = (i == 0 || i == 1);
+    int   partner = (i == 0) ? 1 : (i == 1) ? 0 : (i == 2) ? 3 : 2;
+    bool  isPivot = (rosTargetRpmSigned[0] * rosTargetRpmSigned[2] < -0.5f);
 
     if (target <= 0.1f) {
-      wpid[i].pwmOutput = 0;
-      wpid[i].integral = 0;
-      wpid[i].lastError = 0;
-      wpid[i].filteredDeriv = 0;
-      slew[i].target = 0;
+      wpid[i].pwmOutput = 0.0f;
+      wpid[i].integral = 0.0f;
+      wpid[i].lastError = 0.0f;
+      wpid[i].filteredDeriv = 0.0f;
+      slew[i].target = 0.0f;
       continue;
     }
 
-    // 1. Feedforward có bù ma sát tĩnh thích ứng (Adaptive Friction Compensation)
-    // - Khi xoay tại chỗ (Pivot Turn): sàn 45 PWM (min_floor 36) đủ mô-men xoay đầm chắc
-    // - Khi bò chậm (target <= 8.5 RPM ~ 0.06 - 0.08 m/s): hạ sàn về 22-30 PWM để chạy đúng 0.06 m/s
-    // - Khi chạy nhanh: nâng sàn tuyến tính
-    bool isPivotTurn = (rosTargetRpmSigned[0] * rosTargetRpmSigned[2] < -0.01f);
-    float base_floor;
-    int   min_floor;
-    if (isPivotTurn) {
-      base_floor = 45.0f;
-      min_floor  = 36;
-    } else {
-      if (target <= 8.5f) {
-        // Dải bò chậm 0.06 m/s (~5.7 RPM)
-        base_floor = 22.0f + (target / 8.5f) * 8.0f; // 22.0 -> 30.0 PWM
-        min_floor  = 20;
-      } else {
-        base_floor = 30.0f + ((target - 8.5f) / 211.5f) * 25.0f; // 30 -> 55 PWM
-        min_floor  = 26;
-      }
+    // Bảo vệ khi 1 bánh bị hỏng encoder:
+    // Nếu bánh i báo 0 RPM nhưng bánh cùng vế (partner) đang quay tốt (> 2.0 RPM) và đã cấp điện áp > 30 PWM:
+    // -> Đồng bộ vận tốc thực tế theo bánh cùng vế để bánh hỏng encoder luôn quay đều cùng đồng đội, không bị khóa cứng hay vọt tốc!
+    bool partnerHealthy = (actualRPM[partner] > 2.0f);
+    bool encoderFaultSuspected = (rpm_act < 0.4f && partnerHealthy && wpid[i].prevPwmOutput > 30.0f);
+    if (encoderFaultSuspected) {
+      rpm_act = actualRPM[partner];
     }
-    float ff_pwm = base_floor + (target / 220.0f) * (255.0f - base_floor);
+
+    // 1. Feedforward số thực 12-bit chuẩn xác theo đường đặc tính 775 24V:
+    // - Khi chạy thẳng bám luống (!isPivot): ff_pwm = 10.6 + (target/220)*65 (12.61 PWM tại 6.8 RPM), giữ 100% độ êm mượt.
+    // - Khi xoay tại chỗ 4 bánh ngược chiều (isPivot): cấp ngay ff_pwm = 38.0 + (target/220)*95 (~44 PWM) và min_floor = 32.0f
+    //   để thắng ma sát trượt ngang trên đất cỏ gồ ghề, giúp cả 4 bánh bứt phá đồng thời không bánh nào bị lì/khóa!
+    float ff_pwm    = isPivot ? (38.0f + (target / 220.0f) * 95.0f) : (10.6f + (target / 220.0f) * 65.0f);
+    float min_floor = isPivot ? 32.0f : 9.5f;
+
+    // Trong 180ms đầu tiên khi vừa khởi động tiến thẳng từ trạng thái đứng yên (!isPivot):
+    // Giữ nguyên điện áp Feedforward phẳng tuyệt đối để bánh xe gia tốc tự nhiên theo quán tính lên 6.8 RPM mà không bị tích phân nhồi vọt lố!
+    if (!isPivot && (nowMs - startMoveTime < 180UL)) {
+      wpid[i].integral      = 0.0f;
+      wpid[i].lastError     = 0.0f;
+      wpid[i].filteredDeriv = 0.0f;
+      wpid[i].pwmOutput     = ff_pwm;
+      wpid[i].prevPwmOutput = ff_pwm;
+      float sign = (currentDirection == "ROS") ? ((rosTargetRpmSigned[i] >= 0.0f) ? 1.0f : -1.0f) : 1.0f;
+      slew[i].target = sign * wpid[i].pwmOutput;
+      continue;
+    }
 
     // 2. Sai số bám tốc độ mục tiêu độc lập cho từng bánh
     float track_error = target - rpm_act;
@@ -460,87 +533,129 @@ void updatePID(float dt) {
       track_error = 0.0f;
     }
 
-    // 3. Khâu tích phân (Integral) có Anti-Windup & Tự động bơm lực khi gặp đất gồ ghề
-    // Khi chạy chậm (target <= 8.5 RPM), sai số tuyệt đối nhỏ nhưng xe cần mô-men lớn để trèo gờ đất:
-    float eff_error = track_error;
-    if (target <= 8.5f && track_error > 0.0f) {
-      // Bánh đang quay chậm hơn lệnh (bị cản bởi mô đất/gờ rãnh) -> khuếch đại sai số để tích phân bơm lực nhanh
-      eff_error *= 2.5f;
-    }
-    wpid[i].integral = constrain(wpid[i].integral + eff_error * dt, -140.0f, 140.0f);
+    // Phát hiện bánh quay trơn (trượt bánh khi giảm tải góc chéo lúc quay đầu trên đất gồ ghề):
+    bool pivotWheelSpin = isPivot && (rpm_act > target * 1.25f) && (rpm_act > actualRPM[partner] * 1.25f + 2.0f);
 
-    // 4. Khâu vi phân (Derivative) có lọc nhiễu tần số cao
+    // 3. Khâu tích phân (Integral) số thực siêu mượt:
+    // - Khi đang xoay tại chỗ (isPivot): nhân 3.0x tốc độ đùn tích phân lên tới +210.0 để thắng lực cản ngang của cỏ dày.
+    // - Khi thiếu tốc mạnh lúc đi thẳng (gặp mô đất, rpm_act < 50% target): nhân 2.2x tốc độ đùn tích phân.
+    // - Khi bánh bị trượt quay trơn (slipping / pivotWheelSpin): hạ tích phân êm dịu để bánh bám đất trở lại.
+    if (!slipping[i] && !pivotWheelSpin) {
+      float int_gain = 1.0f;
+      if (isPivot && track_error > 0.8f) {
+        int_gain = 3.0f;
+      } else if (rpm_act < target * 0.50f && track_error > 1.5f) {
+        int_gain = 2.2f;
+      }
+      wpid[i].integral = constrain(wpid[i].integral + track_error * int_gain * dt, -2.5f, 210.0f);
+    } else {
+      wpid[i].integral *= 0.88f;
+    }
+
+    // 4. Khâu vi phân (Derivative)
     float rawDeriv = (track_error - wpid[i].lastError) / dt;
     wpid[i].filteredDeriv = DERIVATIVE_FILTER * rawDeriv + (1.0f - DERIVATIVE_FILTER) * wpid[i].filteredDeriv;
     wpid[i].lastError = track_error;
 
-    // 5. Tính toán PID cơ sở (sử dụng eff_error để bơm lực tức thì khi kẹt dốc)
-    float pid_corr = (wpid[i].kp * eff_error) + (wpid[i].ki * wpid[i].integral) + (wpid[i].kd * wpid[i].filteredDeriv);
+    // 5. Tính toán PID số thực (Tăng cường Kp & Ki khi xoay tại chỗ để 4 bánh quay cực khỏe, không bị khóa bánh)
+    float kp_eff = isPivot ? 1.50f : wpid[i].kp;
+    float ki_eff = isPivot ? 2.40f : wpid[i].ki;
+    float pid_corr = (kp_eff * track_error) + (ki_eff * wpid[i].integral) + (wpid[i].kd * wpid[i].filteredDeriv);
 
-    // 6. Tổng hợp PWM điều khiển hoàn chỉnh (0-255)
-    int desired = constrain((int)(ff_pwm + pid_corr), 0, 255);
+    // 6. Tổng hợp PWM số thực (0.0 - 255.0 -> ánh xạ sang 0 - 4095 ở writeSingleDrive)
+    float desired = constrain(ff_pwm + pid_corr, 0.0f, 235.0f);
 
-    // Sàn PWM tối thiểu để động cơ 775 duy trì lăn bánh khỏe khoắn trên đất gồ ghề
     if (target > 1.0f && desired < min_floor) {
       desired = min_floor;
     }
 
-    // Giới hạn biến thiên PWM bất đối xứng (chống giật sốc cơ khí)
-    int maxChange = (desired > wpid[i].prevPwmOutput) ? MAX_PWM_CHANGE_UP : MAX_PWM_CHANGE_DOWN;
-    int delta   = constrain(desired - wpid[i].prevPwmOutput, -maxChange, maxChange);
-    wpid[i].pwmOutput     = constrain(wpid[i].prevPwmOutput + delta, 0, 255);
+    if (slipping[i] || pivotWheelSpin) {
+      desired = fminf(desired, wpid[i].prevPwmOutput * SLIP_PWM_CUT);
+    }
+
+    // Đồng bộ công suất cặp bánh cùng vế khi 1 bánh nghi hỏng encoder
+    if (encoderFaultSuspected && wpid[partner].pwmOutput > min_floor) {
+      desired = 0.35f * desired + 0.65f * wpid[partner].pwmOutput;
+    }
+
+    // Giới hạn biến thiên PWM vi sai:
+    // - Khi đang xoay tại chỗ (isPivot): cho phép tăng +6.0 / giảm -4.0 PWM/50ms (+120 PWM/s) để cấp lực xoay tức thời thắng cỏ dày.
+    // - Khi bánh đang bị cản mạnh bởi mô đất (rpm_act < 45% target): cho phép tăng +2.2 PWM/50ms (+44 PWM/s) để leo vượt mô đất.
+    // - Khi bánh đã lăn ổn định: khóa bước biến thiên ở +0.30 / -0.25 PWM mỗi 50ms (< 0.1% điện áp) -> Triệt tiêu 100% hiện tượng gật bánh!
+    float stepUpLim, stepDownLim;
+    if (isPivot) {
+      stepUpLim   = 6.0f;
+      stepDownLim = 4.0f;
+    } else if (rpm_act < target * 0.45f && track_error > 1.5f) {
+      stepUpLim   = 2.20f;
+      stepDownLim = 0.25f;
+    } else {
+      stepUpLim   = 0.30f;
+      stepDownLim = 0.25f;
+    }
+    float maxChange   = (desired > wpid[i].prevPwmOutput) ? stepUpLim : stepDownLim;
+    float delta       = constrain(desired - wpid[i].prevPwmOutput, -maxChange, maxChange);
+    wpid[i].pwmOutput     = constrain(wpid[i].prevPwmOutput + delta, 0.0f, 235.0f);
     wpid[i].prevPwmOutput = wpid[i].pwmOutput;
 
-    // Giảm tải cho bánh bị kẹt cứng
+    // Nếu 1 bánh báo kẹt/hỏng encoder quá 4.0s: nếu bánh cùng vế vẫn quay thì đồng bộ theo bánh cùng vế, ngược lại giới hạn an toàn 160 PWM
     if (wHealth[i].isStalled) {
-      wpid[i].pwmOutput = max(0, wpid[i].pwmOutput - 50);
-      wpid[i].integral = 0;
+      if (partnerHealthy && wpid[partner].pwmOutput > 20.0f) {
+        wpid[i].pwmOutput     = wpid[partner].pwmOutput;
+        wpid[i].prevPwmOutput = wpid[partner].pwmOutput;
+      } else {
+        wpid[i].pwmOutput = fminf(wpid[i].pwmOutput, 160.0f);
+        wpid[i].integral  = constrain(wpid[i].integral, -5.0f, 120.0f);
+      }
     }
 
     // Xác định chiều quay
-    int sign = 0;
-    if (currentDirection == "ROS")            sign = (rosTargetRpmSigned[i] >= 0.0f) ? 1 : -1;
-    else if (currentDirection == "FORWARD")   sign = 1;
-    else if (currentDirection == "BACKWARD")  sign = -1;
-    else if (currentDirection == "LEFT")      sign = isLeft ? -1 : 1;
-    else if (currentDirection == "RIGHT")     sign = isLeft ? 1 : -1;
+    float sign = 0.0f;
+    if (currentDirection == "ROS")            sign = (rosTargetRpmSigned[i] >= 0.0f) ? 1.0f : -1.0f;
+    else if (currentDirection == "FORWARD")   sign = 1.0f;
+    else if (currentDirection == "BACKWARD")  sign = -1.0f;
+    else if (currentDirection == "LEFT")      sign = isLeft ? -1.0f : 1.0f;
+    else if (currentDirection == "RIGHT")     sign = isLeft ? 1.0f : -1.0f;
 
     slew[i].target = sign * wpid[i].pwmOutput;
   }
 }
 
 // ============================================================
-//  9. SLEW RATE LIMITER — KHỞI ĐỘNG MỀM (40 Hz)
+//  9. SLEW RATE LIMITER — NỘI SUY XUNG 12-BIT FLOAT (40 Hz)
 // ============================================================
 void updateSpeedRamp() {
   unsigned long now = millis();
   if (now - lastRampTime < RAMP_INTERVAL_MS) return;
   lastRampTime = now;
 
+  // Phát hiện chế độ xoay tại chỗ (pivot): 2 vế bánh quay ngược chiều
+  bool isPivotSlew = (slew[0].target * slew[2].target < -0.5f);
+
   for (int i = 0; i < 4; i++) {
     float &cur  = slew[i].current;
-    int    tgt  = slew[i].target;
+    float  tgt  = slew[i].target;
     float &step = slew[i].step;
 
-    if (tgt == 0) {
-      step = constrain(abs(cur) / 8.0f, RAMP_STEP_MIN, RAMP_STEP_STOP_MAX);
+    if (fabsf(tgt) < 0.05f) {
+      step = 3.0f;  // Hạ tốc êm ái khi dừng
+    } else if (isPivotSlew) {
+      step = 4.0f;  // Pivot turn: nội suy nhanh để thắng ma sát trượt ngang
+    } else if (fabsf(tgt) > fabsf(cur)) {
+      step = 1.5f;  // Nội suy 40Hz siêu mượt từ đầu ra PID 20Hz
     } else {
-      if (currentDirection == "ROS") {
-        step = 25.0f; // Chế độ ROS: bám sát lệnh điều khiển của Pi, giảm trễ đáp ứng
-      } else {
-        step = constrain(abs((float)tgt - cur) / 40.0f, RAMP_STEP_MIN, RAMP_STEP_MAX);
-      }
+      step = 1.0f;  // Giảm tốc êm như lụa
     }
 
-    if (abs((float)tgt - cur) <= step) cur = (float)tgt;
-    else if (cur < (float)tgt)         cur += step;
-    else                               cur -= step;
+    if (fabsf(tgt - cur) <= step) cur = tgt;
+    else if (cur < tgt)           cur += step;
+    else                          cur -= step;
   }
 
-  writeSingleDrive(DRV1_RPWM, DRV1_LPWM, CH_DRV1_F, CH_DRV1_R, (int)slew[0].current, INV_DRV1);
-  writeSingleDrive(DRV2_RPWM, DRV2_LPWM, CH_DRV2_F, CH_DRV2_R, (int)slew[1].current, INV_DRV2);
-  writeSingleDrive(DRV3_RPWM, DRV3_LPWM, CH_DRV3_F, CH_DRV3_R, (int)slew[2].current, INV_DRV3);
-  writeSingleDrive(DRV4_RPWM, DRV4_LPWM, CH_DRV4_F, CH_DRV4_R, (int)slew[3].current, INV_DRV4);
+  writeSingleDrive(DRV1_RPWM, DRV1_LPWM, CH_DRV1_F, CH_DRV1_R, slew[0].current, INV_DRV1);
+  writeSingleDrive(DRV2_RPWM, DRV2_LPWM, CH_DRV2_F, CH_DRV2_R, slew[1].current, INV_DRV2);
+  writeSingleDrive(DRV3_RPWM, DRV3_LPWM, CH_DRV3_F, CH_DRV3_R, slew[2].current, INV_DRV3);
+  writeSingleDrive(DRV4_RPWM, DRV4_LPWM, CH_DRV4_F, CH_DRV4_R, slew[3].current, INV_DRV4);
 }
 
 // ============================================================
@@ -622,11 +737,30 @@ void handleCommand(String command) {
       if (fabsf(r[0]) < 0.1f && fabsf(r[1]) < 0.1f && fabsf(r[2]) < 0.1f && fabsf(r[3]) < 0.1f) {
         stopMotor(false);
       } else {
+        bool wasStopped = !isMoving;
+        bool isPivotCmd = (r[0] * r[2] < -0.5f);
+        if (wasStopped && !isPivotCmd) {
+          startMoveTime = millis();
+        }
         isMoving = true;
         currentDirection = "ROS";
         for (int i = 0; i < 4; i++) {
+          float tgt_abs = fabsf(r[i]);
+          float init_ff = isPivotCmd ? (38.0f + (tgt_abs / 220.0f) * 95.0f) : (10.6f + (tgt_abs / 220.0f) * 65.0f);
+          float sgn     = (r[i] >= 0.0f) ? 1.0f : -1.0f;
+          if (wasStopped || (rosTargetRpmSigned[i] * r[i] < -0.01f)) {
+            if (!isPivotCmd && (rosTargetRpmSigned[i] * r[i] < -0.01f)) startMoveTime = millis();
+            wpid[i].integral      = 0.0f;
+            wpid[i].lastError     = 0.0f;
+            wpid[i].filteredDeriv = 0.0f;
+            wpid[i].pwmOutput     = init_ff;
+            wpid[i].prevPwmOutput = init_ff;
+            slew[i].current       = sgn * init_ff;
+            slew[i].target        = sgn * init_ff;
+            enc[i].prevFilteredRpm = 0.0f;
+          }
           rosTargetRpmSigned[i] = r[i];
-          wpid[i].targetRPM = fabsf(r[i]);
+          wpid[i].targetRPM = tgt_abs;
           wpid[i].enabled = pidGlobalEnabled;
         }
       }

@@ -1,11 +1,11 @@
 class FSMState:
     IDLE = "IDLE"
     TRACKING = "TRACKING"
+    DRIVE_OUT = "DRIVE_OUT"
     REACTIVE_AVOID = "REACTIVE_AVOID"
     AVOID_PLANNING = "AVOID_PLANNING"
     PATH_FOLLOWING = "PATH_FOLLOWING"
     UTURN_PLANNING = "UTURN_PLANNING"
-    UTURN_EXECUTION = "UTURN_EXECUTION"
     RECOVERY = "RECOVERY"
     EMERGENCY_STOP = "EMERGENCY_STOP"
 
@@ -17,6 +17,8 @@ class FSMEvent:
     ObstacleCleared = "ObstacleCleared"
     PlannerSuccess = "PlannerSuccess"
     PlannerFailed = "PlannerFailed"
+    DriveOutRequested = "DriveOutRequested"
+    DriveOutCompleted = "DriveOutCompleted"
     UTurnRequested = "UTurnRequested"
     UTurnFinished = "UTurnFinished"
     PathCompleted = "PathCompleted"
@@ -63,12 +65,24 @@ class FSMCoordinator:
         elif old_state == FSMState.TRACKING:
             if event == FSMEvent.ObstacleDetected:
                 new_state = FSMState.REACTIVE_AVOID
+            elif event == FSMEvent.DriveOutRequested:
+                new_state = FSMState.DRIVE_OUT
             elif event == FSMEvent.UTurnRequested:
                 new_state = FSMState.UTURN_PLANNING
             elif event == FSMEvent.LaneLost:
                 new_state = FSMState.RECOVERY
             elif event == FSMEvent.LocalizationLost:
                 new_state = FSMState.RECOVERY
+            elif event == FSMEvent.Emergency:
+                new_state = FSMState.EMERGENCY_STOP
+
+        elif old_state == FSMState.DRIVE_OUT:
+            if event == FSMEvent.UTurnRequested:
+                new_state = FSMState.UTURN_PLANNING
+            elif event == FSMEvent.DriveOutCompleted:
+                new_state = FSMState.IDLE
+            elif event == FSMEvent.LaneDetected:
+                new_state = FSMState.TRACKING
             elif event == FSMEvent.Emergency:
                 new_state = FSMState.EMERGENCY_STOP
 
@@ -90,10 +104,7 @@ class FSMCoordinator:
 
         elif old_state == FSMState.PATH_FOLLOWING:
             if event == FSMEvent.PathCompleted:
-                if self.state_before_planning == FSMState.UTURN_PLANNING:
-                    new_state = FSMState.UTURN_EXECUTION
-                else:
-                    new_state = FSMState.TRACKING
+                new_state = FSMState.TRACKING
             elif event == FSMEvent.ObstacleDetected:
                 new_state = FSMState.REACTIVE_AVOID
             elif event == FSMEvent.Emergency:
@@ -107,13 +118,6 @@ class FSMCoordinator:
             elif event == FSMEvent.Emergency:
                 new_state = FSMState.EMERGENCY_STOP
 
-        elif old_state == FSMState.UTURN_EXECUTION:
-            if event == FSMEvent.UTurnFinished or event == FSMEvent.LaneDetected:
-                new_state = FSMState.TRACKING
-            elif event == FSMEvent.LaneLost:
-                new_state = FSMState.RECOVERY
-            elif event == FSMEvent.Emergency:
-                new_state = FSMState.EMERGENCY_STOP
 
         elif old_state == FSMState.RECOVERY:
             if event == FSMEvent.RecoverySuccess:

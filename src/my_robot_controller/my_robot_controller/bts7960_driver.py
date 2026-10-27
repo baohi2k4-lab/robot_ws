@@ -46,9 +46,9 @@ class BTS7960DriverNode(Node):
 
         # ── Robot physical parameters ────────────────────────────────────
         self.declare_parameter('wheel_base', 0.58)       # m  (chassis 0.53 + 2×wheel_ygap)
-        self.declare_parameter('max_linear_speed', 0.18) # m/s → 100% PWM (lực mạnh, mở rộng dải PWM quay xe)
-        self.declare_parameter('pwm_frequency', 1000)    # Hz
-        self.declare_parameter('min_duty_cycle', 32.0)   # % — Nâng lên 32% để motor luôn đủ momen xoắn vượt ma sát tĩnh trên cỏ/đất
+        self.declare_parameter('max_linear_speed', 0.16) # m/s → 100% PWM (ở 0.07 m/s đạt ~44% PWM, tạo xung khỏe vượt cản)
+        self.declare_parameter('pwm_frequency', 1500)    # Hz — Tần số xung tối ưu cho motor 775 có hộp số 220 RPM
+        self.declare_parameter('min_duty_cycle', 38.0)   # % — Sàn 38% PWM để motor 775 luôn đủ mô-men xoắn thắng ma sát tĩnh
 
         # ── GPIO pin numbers (BCM numbering) ─────────────────────────────
         self.declare_parameter('left_rpwm_pin', 17)   # trái tiến
@@ -122,11 +122,11 @@ class BTS7960DriverNode(Node):
         v_right = linear_x + angular_z * self.wheel_base / 2.0
 
         # Smooth Forward-Bias Kinematics:
-        # Khi xe đang chạy tiến (linear_x > 0.03 m/s), cả 2 bánh phải luôn duy trì lực kéo tiến ổn định.
+        # Khi xe đang chạy tiến (linear_x > 0.02 m/s), cả 2 bánh phải luôn duy trì lực kéo tiến ổn định.
         # Tuyệt đối không để bánh trong bị đảo chiều giật lùi gây khựng xe và mất lực.
         # Bánh trong giữ vận tốc tiến sàn tối thiểu (min_fwd), bánh ngoài tăng tốc tương ứng để tạo đúng lực quay.
-        if linear_x > 0.03:
-            min_fwd = 0.035  # m/s (~30% duty sàn để motor luôn có momen đẩy tiến)
+        if linear_x > 0.02:
+            min_fwd = 0.055  # m/s (~38% duty sàn để motor 775 220RPM luôn có mô-men đẩy tiến đầm chắc)
             min_v = min(v_left, v_right)
             if min_v < min_fwd:
                 shift = min_fwd - min_v

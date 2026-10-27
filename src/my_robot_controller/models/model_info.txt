@@ -1,0 +1,115 @@
+================================================================================
+                    CROP ROW DETECTION CNN - MODEL SPECIFICATION
+================================================================================
+Project: Crop Row Detection for Autonomous Agriculture Robot
+Export Date: 2026-10-23
+Framework: PyTorch 2.10.0+cu126 -> ONNX Opset 18
+Files:
+  - ONNX Model (Deployment/ROS2) : crop_row_cnn_best.onnx (94.22 MB)
+  - PyTorch FP32 State Dict      : crop_row_cnn_best.h5   (93.85 MB)
+  - PyTorch FP16 Lightweight     : crop_row_cnn_best_fp16.h5 (46.97 MB)
+================================================================================
+
+[1. ARCHITECTURE]
+- Model Type         : UNet (Semantic Segmentation)
+- Implementation     : segmentation_models_pytorch (SMP)
+- Encoder Backbone   : ResNet-34 (Pretrained on ImageNet)
+- Input Channels     : 3 (RGB)
+- Output Classes     : 1 (Binary Mask - Crop Row Polyline)
+- Total Parameters   : 24,550,360
+- Embedded Activation: Sigmoid (Output directly in probability range [0.0, 1.0])
+
+[2. INPUT SPECIFICATIONS (TENSOR: 'input')]
+- Input Resolution   : 384 x 384 pixels (Height = 384, Width = 384)
+- Color Order        : RGB (Convert from OpenCV BGR: cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+- Data Type          : Float32 (numpy.float32 / torch.float32)
+- Value Range        : [0.0, 1.0] (Normalized via pixel / 255.0)
+- Mean / Std Norm    : NONE (DO NOT subtract ImageNet mean or divide by std)
+- Tensor Shape (PyT) : (Batch, 3, 384, 384) [NCHW layout]
+- Tensor Shape (ONNX): ('batch_size', 3, 384, 384) [Dynamic Batch supported]
+
+[3. OUTPUT SPECIFICATIONS (TENSOR: 'output')]
+- Output Resolution  : 384 x 384 pixels (Height = 384, Width = 384)
+- Output Channels    : 1
+- Value Range        : [0.0, 1.0] (Probabilities via embedded Sigmoid)
+- Tensor Shape       : (Batch, 1, 384, 384) [NCHW layout]
+- Recommended Thresh : 0.35 (Values >= 0.35 represent crop row lines)
+- Target Objects     : Crop rows, field corridors, box obstacle rows
+
+[4. INFERENCE & POST-PROCESSING PIPELINE]
+1. Resize raw camera frame to 384x384:
+     input_resized = cv2.resize(bgr_frame, (384, 384))
+2. Convert BGR to RGB and scale to [0.0, 1.0]:
+     rgb = cv2.cvtColor(input_resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+3. Transpose to NCHW format:
+     blob = np.transpose(rgb, (2, 0, 1))[np.newaxis, ...]  # Shape: (1, 3, 384, 384)
+4. Execute ONNX Runtime:
+     outputs = session.run(["output"], {"input": blob})
+     prob_map = outputs[0].squeeze()  # Shape: (384, 384)
+5. Binarize at threshold 0.35:
+     mask_384 = (prob_map >= 0.35).astype(np.uint8) * 255
+6. Scale mask back to original camera resolution:
+     mask_orig = cv2.resize(mask_384, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+
+[5. BENCHMARK & PERFORMANCE]
+- Device Benchmark   : NVIDIA GeForce RTX 3050 Laptop GPU / Intel CPU
+- Latency (GPU RTX)  : 15.4 ms / frame (~65.0 FPS) - Exceeds Real-Time (>= 30 FPS)
+- Latency (CPU ONNX) : 18.0 - 22.0 ms / frame (~45 - 55 FPS)
+- Best Epoch Trained : Epoch 115 / 150
+- Validation Set     : 126 images (Stratified 80/20 from 631 total dataset)
+- Pixel Accuracy     : 99.24%
+- Precision (Clean)  : 79.03% (Virtually zero grass background false positives)
+- Recall (Coverage)  : 76.96%
+- Mean IoU           : 63.91%
+- Dice / F1 Score    : 77.98% (Peak 75.77% on validation checkpoint)
+- False Alarm Rate   : 0.0% on empty grass/headland scenes (10/10 clean)
+
+================================================================================
+                       MACHINE-READABLE JSON BLOCK (FOR AI)
+================================================================================
+```json
+{
+  "model_name": "crop_row_cnn_best",
+  "task": "semantic_segmentation",
+  "architecture": "smp_unet_resnet34",
+  "weights_file": "crop_row_cnn_best.h5",
+  "onnx_file": "crop_row_cnn_best.onnx",
+  "fp16_file": "crop_row_cnn_best_fp16.h5",
+  "input": {
+    "tensor_name": "input",
+    "shape": [1, 3, 384, 384],
+    "height": 384,
+    "width": 384,
+    "channels": 3,
+    "layout": "NCHW",
+    "color_space": "RGB",
+    "dtype": "float32",
+    "normalization": {
+      "scale": 0.00392156862,
+      "mean": [0.0, 0.0, 0.0],
+      "std": [1.0, 1.0, 1.0]
+    }
+  },
+  "output": {
+    "tensor_name": "output",
+    "shape": [1, 1, 384, 384],
+    "channels": 1,
+    "layout": "NCHW",
+    "activation": "sigmoid",
+    "value_range": [0.0, 1.0],
+    "default_threshold": 0.35
+  },
+  "metrics": {
+    "best_epoch": 115,
+    "total_trained_epochs": 124,
+    "accuracy": 0.9924,
+    "precision": 0.7903,
+    "recall": 0.7696,
+    "iou": 0.6391,
+    "dice_f1": 0.7798,
+    "inference_fps_rtx3050": 65.0,
+    "latency_ms": 15.4
+  }
+}
+```
+================================================================================

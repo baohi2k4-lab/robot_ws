@@ -117,13 +117,13 @@ class PurePursuitController(ControllerInterface):
     Pure Pursuit Path Tracking Controller.
     """
     def __init__(self):
-        self.turn_linear_speed = 0.72
-        self.turn_angular_speed = 2.10
+        self.turn_linear_speed = 0.07
+        self.turn_angular_speed = 0.25
         self.path = []
         self.path_index = 0
         self.enabled = False
 
-    def initialize(self, turn_linear_speed=0.18, turn_angular_speed=0.50):
+    def initialize(self, turn_linear_speed=0.07, turn_angular_speed=0.50):
         self.turn_linear_speed = turn_linear_speed
         self.turn_angular_speed = turn_angular_speed
         self.path = []
@@ -198,7 +198,7 @@ class PurePursuitController(ControllerInterface):
         dy = target[1] - current_y
         dist = math.sqrt(dx*dx + dy*dy)
             
-        if self.path_index >= len(self.path) - 2 and dist < 0.15:
+        if (self.path_index >= len(self.path) - 3 and dist < 0.35) or (self.path_index >= len(self.path) - 1 and dist < 0.50):
             return {
                 "linear_velocity": 0.0,
                 "angular_velocity": 0.0,
@@ -211,11 +211,22 @@ class PurePursuitController(ControllerInterface):
         yaw_error = target_yaw - current_yaw
         yaw_error = math.atan2(math.sin(yaw_error), math.cos(yaw_error))
 
-        # Standard curvature: kappa = 2 * sin(alpha) / L_d
-        # Angular velocity: w = v * kappa
-        linear_vel = float(np.clip(self.turn_linear_speed * math.cos(yaw_error * 0.5), 0.06, self.turn_linear_speed))
-        angular_vel = 2.0 * linear_vel * math.sin(yaw_error) / max(0.20, dist)
-        angular_vel = np.clip(angular_vel, -self.turn_angular_speed, self.turn_angular_speed)
+        # Skid-Steer Heading Alignment with Rolling Pivot (Chống cày đất đứng yên)
+        abs_err = abs(yaw_error)
+        min_roll = min(0.06, self.turn_linear_speed)
+        if abs_err > math.radians(45.0):
+            # Góc lệch cực lớn: bò tiến giữ đà phá ma sát tĩnh + quay vi sai mô-men cực đại
+            linear_vel = min(0.055, self.turn_linear_speed)
+            angular_vel = float(math.copysign(self.turn_angular_speed, yaw_error))
+        elif abs_err > math.radians(20.0):
+            # Góc lệch trung bình (20° - 45°): bò tiến 80% tốc độ ôm cua kết hợp bẻ lái mạnh
+            linear_vel = float(np.clip(self.turn_linear_speed * 0.85, min_roll, self.turn_linear_speed))
+            angular_vel = float(math.copysign(self.turn_angular_speed, yaw_error))
+        else:
+            # Thân xe đã bám sát tiếp tuyến (lệch <= 20°): Lăn bánh tiến êm mượt đúng 0.07 m/s bám quỹ đạo
+            linear_vel = float(np.clip(self.turn_linear_speed * math.cos(yaw_error), min_roll, self.turn_linear_speed))
+            angular_vel = 2.0 * linear_vel * math.sin(yaw_error) / max(0.20, dist)
+            angular_vel = float(np.clip(angular_vel, -self.turn_angular_speed, self.turn_angular_speed))
         
         return {
             "linear_velocity": linear_vel,

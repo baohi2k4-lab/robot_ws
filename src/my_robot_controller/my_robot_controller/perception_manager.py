@@ -85,7 +85,7 @@ class PerceptionManager:
         self.front_stop_dist = float(front_stop_dist)    # m — vật cản trước mũi -> obstacle_detected
         self.side_danger_dist = float(side_danger_dist)  # m — ngưỡng kích hoạt Virtual Repulsion sườn
 
-    def process_sensors(self, cv_image, distance_traveled, rx=0.0, ry=0.0, ryaw=0.0, max_angle_deg=3.5, inside_row=True, external_cnn=None):
+    def process_sensors(self, cv_image, distance_traveled, rx=0.0, ry=0.0, ryaw=0.0, max_angle_deg=3.5, inside_row=True, external_cnn=None, run_cnn=True):
         """
         Runs inference and checks lidar, returning standardized PerceptionOutput.
         """
@@ -94,10 +94,15 @@ class PerceptionManager:
         # 1. Camera / CNN Processing
         heading_error = 0.0
         lane_offset = 0.0
-        lane_center = 0.0
+        lane_center = 191.5
         confidence = 0.0
         
-        if external_cnn is not None:
+        if not run_cnn:
+            # Khi đang ở pha bám Mũi tên Vàng/Đen ngoài đầu luống (DRIVE_OUT, TURN_90_TO_BLACK, APPROACH_BLACK_05M),
+            # tạm nhường 100% tài nguyên CPU/GPU cho YOLO (bao1.onnx) + Depth D435 để đạt FPS tối đa.
+            if self.inference is not None:
+                self.inference.latest_mask = None
+        elif external_cnn is not None:
             # Nhận trực tiếp kết quả tính toán AI từ Laptop (Offloading - giải phóng CPU Pi)
             heading_error = external_cnn.get('heading_error', 0.0)
             lane_offset = external_cnn.get('lane_offset', 0.0)

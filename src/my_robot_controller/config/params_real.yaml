@@ -5,15 +5,20 @@
 
 cnn_driver_node:
   ros__parameters:
-    # Đường dẫn model ONNX INT8 (24MB, tối ưu hóa suy luận tăng tốc cho Raspberry Pi)
-    model_path: 'models/crop_row_cnn_best_final_int8.onnx'
-    # Kích thước input mạng CNN: 384x384 (Đạt chuẩn ~2 FPS - cập nhật góc lái 2 lần mỗi giây trên Pi)
+    # Đường dẫn model CNN UNet-ResNet34 ONNX (Input 384x384 RGB, Output Sigmoid [0, 1])
+    model_path: 'models/crop_row_cnn_best.onnx'
+    # Đường dẫn model YOLO11n ONNX nhận diện Mũi tên Vàng & Đen (bao1.onnx)
+    yolo_model_path: 'models/bao1.onnx'
+    # Kích thước input mạng CNN: 384x384 (Khớp 100% chuẩn model_info.json)
     input_height: 384
     input_width: 384
     save_debug_imgs: false
 
     # Cấu hình Topics đồng bộ cảm biến trên xe thật
     image_topic: '/camera/color/image_raw'
+    depth_topic: '/camera/depth/image_raw'
+    enable_depth_safety: true
+    depth_estop_dist: 0.22      # m — Phanh khẩn cấp 3D quang học khi có chướng ngại tầm thấp sát mũi
     odom_topic: '/odometry/filtered'
     imu_topic: '/imu/data'
 
@@ -22,12 +27,14 @@ cnn_driver_node:
 
     mask_threshold: 0.35        # cao hơn sim vì model nhận diện ảnh thật tốt hơn
 
-    # Tốc độ di chuyển (m/s) — Chạy 0.06 m/s (6 cm/s) ổn định nhận diện cảm biến & camera D435
-    linear_speed: 0.06
-    turn_linear_speed: 0.00           # Dừng hẳn khi xoay nắn góc (không vừa xoay vừa lết tới, tránh đâm gốc cây)
-    turn_angular_speed: 0.28          # rad/s — Vận tốc góc xoay căn chỉnh êm dịu, tương xứng nhịp 0.06 m/s (v_bánh ~0.08 m/s)
-    turn_in_place_threshold_deg: 14.0 # Ngưỡng dừng xoay tại chỗ: xe luôn VỪA CHẠY VỪA UỐN LƯỢN MƯỢT MÀ, chỉ dừng khi lệch cực lớn (> 14°)
-    turn_in_place_resume_deg: 5.0     # Ngưỡng xong việc xoay: góc lệch <= 5.0° là lập tức tiếp tục chạy tiến
+    # Tốc độ di chuyển (m/s) — Chuẩn 0.07 m/s (~7.5 RPM thực tế trên đất cỏ) khỏe dư lực vượt mô đất nhỏ
+    linear_speed: 0.07
+    turn_linear_speed: 0.07           # m/s — Duy trì đủ lực 7 cm/s khi tiếp cận mũi tên trên nền cỏ gồ ghề
+    turn_angular_speed: 0.48          # rad/s — Vận tốc góc xoay 4 bánh ngược chiều khỏe khoắn (~13.8 RPM cả 4 bánh)
+    yellow_arrow_turn_dist: 0.50      # m — Khi gặp Điều kiện 1 (Mũi tên Vàng) cách còn <= 0.50m thì kích hoạt quay đầu
+    yellow_arrow_turn_angle_deg: 90.0 # độ — Khi gặp Điều kiện 1 (Mũi tên Vàng <= 0.50m), quay phải 90° tìm Điều kiện 2 (Mũi tên Đen)
+    turn_in_place_threshold_deg: 30.0 # Ngưỡng dừng xoay tại chỗ: xe luôn VỪA CHẠY VỪA UỐN LƯỢN MƯỢT MÀ
+    turn_in_place_resume_deg: 10.0    # Ngưỡng xong việc xoay: góc lệch <= 10.0° là lập tức tiếp tục chạy tiến
 
     # Bộ điều khiển trượt SMC bám luống với lực bẻ lái êm dịu, không giật cục (Phong cách A)
     lambda_smc: 2.0             # hệ số bề mặt trượt S = de + lambda * e (làm trơn phản ứng)
@@ -36,7 +43,7 @@ cnn_driver_node:
     phi_smc: 0.50               # bề dày lớp biên trượt làm trơn điều khiển
 
     kp: 1.5                     # hệ số tỷ lệ
-    max_steering_angle_deg: 15.0 # góc bẻ lái tối đa 15.0 độ giúp xe uốn cong mượt mà về giữa hàng
+    max_steering_angle_deg: 16.0 # góc bẻ lái tối đa 16.0 độ giúp xe uốn cong mượt mà về giữa hàng
     ema_alpha: 0.35             # bộ lọc trung bình động EMA mượt mà
 
     # ── Lá Chắn An Toàn & Định Tâm Sườn Vật Lý Bằng LiDAR C1 (LiDAR Active Guard) ──
@@ -52,25 +59,25 @@ cnn_driver_node:
     side_near_dist: 0.42              # m — mép bánh cách hàng 8cm
     side_critical_dist: 0.39          # m — mép bánh cách hàng 5cm
     side_emergency_dist: 0.36         # m — mép bánh cách hàng 2cm
-    side_emergency_speed_ratio: 0.40  # × linear_speed khi tới hạn
+    side_emergency_speed_ratio: 1.00  # × linear_speed khi tới hạn (giữ nguyên 0.07 m/s để không bao giờ mất đà vượt mô đất cỏ)
 
     # Khoảng cách giữa 2 hàng luống thực tế (m)
     row_spacing: 1.20           # Hàng cách hàng 1.20m (chuẩn 3 hàng cây bắp / 2 luống)
-    min_row_length: 1.5         # m — cự ly tối thiểu bắt buộc chạy trong hàng trước khi cho phép nhận biết hết luống
+    min_row_length: 0.40        # m — chỉ cần xe đã vào luống >= 0.40m, khi hết nhìn thấy hàng là lập tức kích hoạt chạy thẳng 1.80m (DRIVE_OUT)
 
     # Ngưỡng confidence — CAO hơn sim vì ảnh thật cho mask rõ ràng hơn
     low_confidence_threshold: 0.30
     high_confidence_threshold: 0.55
 
-    # Tự động nhận biết hết hàng (End of Row) & Quay đầu Omega Turn:
+    # Chế độ chạy: TỰ HÀNH KHÉP KÍN BÁM LUỐNG + TỰ ĐỘNG QUAY ĐẦU SANG LUỐNG 2
     enable_uturn: true
-    low_conf_frames_threshold: 5  # 5 frame liên tiếp thấy hết cây / confidence giảm dưới 30%
-    max_row_length: 10.0          # m — giới hạn an toàn tối đa
+    low_conf_frames_threshold: 8  # 8 frame liên tiếp thấy hết cây / confidence giảm dưới 30%
+    max_row_length: 100.0         # m — cho phép chạy luống dài thực tế đến 100m
 
-    # ── Điều Phối Nhiệm Vụ 2 Luống Thực Nghiệm (3 hàng thùng, 2 luống) ──
-    wait_for_rviz_start: false     # Tự động xuất phát ngay khi bật node (không cần bấm 2D Goal Pose hoặc bat-xe)
-    enable_mission_goals: true      # Giám sát 4 điểm mốc (Start -> Goal 1 -> Goal 2 -> Goal 3)
-    enable_global_plan_assist: true # Hỗ trợ song song cùng CNN giữ đúng tim luống
+    # ── Điều Phối Nhiệm Vụ ──
+    wait_for_rviz_start: false     # Tự động xuất phát ngay khi bật node
+    enable_mission_goals: false    # TẮT ép mốc 3.0m để xe chạy tracking luống dài thực tế liên tục
+    enable_global_plan_assist: false # Thuần bám Camera AI + LiDAR Corridor Centering thực tế
     field_length: 3.0              # m — Chiều dài mỗi luống (3.0m)
     headland_area_length: 4.0      # m — Khoảng không gian quay đầu 4.0m
     goal_tolerance: 0.40           # m — Bán kính dung sai chạm mốc
@@ -87,11 +94,15 @@ cnn_driver_node:
     turn_side: 'RIGHT'             # Chuyển sang luống bên phải (y = -1.20m)
     omega_open_angle_deg: 35.0     # độ — Góc mở cua trái
     omega_r1: 0.85                 # m — Bán kính cung mở trái (nâng từ 0.65 lên 0.85m chống cày đất vi sai)
-    omega_clearance: 0.55          # m — Đoạn thẳng thoát đầu luống (nâng từ 0.25 lên 0.55m chống chém đuôi xe vào thùng)
+    omega_clearance: 0.25          # m — Đoạn thẳng thoát đầu luống trong cung Omega
     omega_lead_in: 0.50            # m — Đoạn dẫn thẳng vào tim Luống 2 (nâng từ 0.40 lên 0.50m nắn thẳng camera)
 
+    # Đoạn chạy thẳng thoát hẳn luống (DRIVE_OUT) trước khi quay đầu hoặc dừng xe
+    drive_out_distance: 1.80       # m — Quãng đường chạy thẳng giữ hướng IMU thoát hẳn đầu luống (1.5m - 2.0m)
+    drive_out_max_time: 50.0       # s — Watchdog thời gian chạy thoát đầu luống ở 0.05 m/s (~36s cho 1.8m)
+
     warmup_time: 3.0
-    drive_out_time: 2.0
+    drive_out_time: 30.0
     min_turn_time: 8.0
 
     # Tham số GPS & Geodetic Datum Origin (Tọa độ WGS-84 gốc)
@@ -115,9 +126,9 @@ gps_driver_node:
 bts7960_driver_node:
   ros__parameters:
     wheel_base: 0.58            # m (đo thực tế khoảng cách tâm 2 bánh)
-    max_linear_speed: 0.18      # m/s = 100% PWM (tăng nhẹ dải trần để mở rộng dải PWM quay xe)
-    min_duty_cycle: 30.0        # % — Nâng lên 30% để motor luôn đủ momen xoắn đẩy xe vượt ma sát tĩnh trên đất gồ ghề
-    pwm_frequency: 1000         # Hz
+    max_linear_speed: 0.16      # m/s = 100% PWM (ở 0.07 m/s đạt ~44% PWM, tạo xung khỏe cho motor 775 220RPM vượt cản)
+    min_duty_cycle: 38.0        # % — Sàn 38% PWM đảm bảo motor 775 có hộp số luôn đủ mô-men xoắn thắng ma sát tĩnh
+    pwm_frequency: 1500         # Hz — Tần số xung tối ưu độ đầm êm và lực kéo trầm cho motor 775 có chổi than
 
     # GPIO BCM pin numbers — chỉnh theo sơ đồ nối dây thực tế
     left_rpwm_pin:  17

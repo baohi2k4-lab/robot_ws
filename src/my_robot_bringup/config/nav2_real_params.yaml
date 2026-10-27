@@ -93,12 +93,12 @@ controller_server:
 
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.10
-      lookahead_dist: 1.20
-      min_lookahead_dist: 0.80
-      max_lookahead_dist: 2.00
+      desired_linear_vel: 0.07
+      lookahead_dist: 1.00
+      min_lookahead_dist: 0.65
+      max_lookahead_dist: 1.60
       lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.65
+      rotate_to_heading_angular_vel: 0.25
       use_velocity_scaled_lookahead_dist: false
       min_approach_linear_velocity: 0.04
       approach_velocity_scaling_dist: 0.4
@@ -110,7 +110,7 @@ controller_server:
       inflation_cost_scaling_factor: 5.0
       use_regulated_linear_velocity_scaling: true
       regulated_linear_scaling_min_radius: 0.70
-      regulated_linear_scaling_min_speed: 0.04
+      regulated_linear_scaling_min_speed: 0.055
       use_rotate_to_heading: true
       rotate_to_heading_min_angle: 0.785
       max_angular_accel: 0.60
@@ -259,10 +259,10 @@ velocity_smoother:
     smoothing_frequency: 40.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.10, 0.0, 0.65]
-    min_velocity: [-0.10, 0.0, -0.65]
-    max_accel: [0.15, 0.0, 0.8]
-    max_decel: [-0.15, 0.0, -0.8]
+    max_velocity: [0.08, 0.0, 0.30]
+    min_velocity: [-0.08, 0.0, -0.30]
+    max_accel: [0.08, 0.0, 0.4]
+    max_decel: [-0.15, 0.0, -0.6]
     odom_topic: "/odometry/filtered"
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

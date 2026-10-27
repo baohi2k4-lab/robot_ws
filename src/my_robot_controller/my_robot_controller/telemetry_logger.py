@@ -244,6 +244,20 @@ class TelemetryLogger:
         except Exception as e:
             print(f"[TelemetryLogger Error] Failed to write turn scores CSV: {e}")
 
+    def finalize_run(self):
+        """
+        Tự động cập nhật sổ nhật ký lich_su_chay_xe.csv và lich_su_chay_xe.md
+        ngay khi kết thúc một phiên chạy robot.
+        """
+        try:
+            ws_dir = os.path.dirname(self.log_dir)
+            script_path = os.path.join(ws_dir, 'scripts', 'generate_run_history.py')
+            if os.path.isfile(script_path):
+                import subprocess
+                subprocess.run(['python3', script_path, '1'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
 
 def main(args=None):
     logger = TelemetryLogger()

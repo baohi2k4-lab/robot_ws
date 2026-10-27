@@ -15,11 +15,20 @@ set -e
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 WS_DIR="$(dirname "$SCRIPT_DIR")"
 
-PI_USER="bao"
+PI_USER="${PI_USER:-bao}"
 if [ -n "$1" ]; then
     PI_IP="$1"
 elif ping -c 1 -W 1 192.168.10.2 >/dev/null 2>&1; then
     PI_IP="192.168.10.2"
+elif ping -c 1 -W 1 bao-desktop.local >/dev/null 2>&1; then
+    PI_IP=$(getent ahosts bao-desktop.local 2>/dev/null | awk 'NR==1{print $1}')
+    [ -z "$PI_IP" ] && PI_IP="bao-desktop.local"
+elif ping -c 1 -W 1 bao.local >/dev/null 2>&1; then
+    PI_IP=$(getent ahosts bao.local 2>/dev/null | awk 'NR==1{print $1}')
+    [ -z "$PI_IP" ] && PI_IP="bao.local"
+elif ping -c 1 -W 1 raspberrypi.local >/dev/null 2>&1; then
+    PI_IP=$(getent ahosts raspberrypi.local 2>/dev/null | awk 'NR==1{print $1}')
+    [ -z "$PI_IP" ] && PI_IP="10.10.180.55"
 elif ping -c 1 -W 1 10.10.178.200 >/dev/null 2>&1; then
     PI_IP="10.10.178.200"
 else
@@ -75,13 +84,33 @@ rsync -avz --progress \
   "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/src/my_robot_description/"
 
 rsync -avz --progress \
+  --exclude '__pycache__' \
+  --exclude '*.pyc' \
+  "$WS_DIR/src/encoder_odom/" \
+  "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/src/encoder_odom/"
+
+rsync -avz --progress \
   "$WS_DIR/src/esp32_source/" \
   "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/src/esp32_source/"
 
 rsync -avz --progress \
+  "$WS_DIR/models/" \
+  "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/models/"
+
+rsync -avz --progress \
+  --exclude '__pycache__' \
+  --exclude '*.pyc' \
+  "$WS_DIR/scripts/" \
+  "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/scripts/"
+
+rsync -avz --progress \
   "$WS_DIR/aliases.sh" \
   "$WS_DIR/cyclonedds.xml" \
+  "$WS_DIR/network_config.env" \
   "${PI_USER}@${PI_IP}:/home/${PI_USER}/robot_ws/"
+
+# Đảm bảo cyclonedds.xml trên Pi bind đúng IP của Pi (192.168.10.2)
+ssh -o StrictHostKeyChecking=no "${PI_USER}@${PI_IP}" "sed -i 's|<NetworkInterface address=\"192\.168\.10\.1\"|<NetworkInterface address=\"192\.168\.10\.2\"|g' /home/${PI_USER}/robot_ws/cyclonedds.xml 2>/dev/null && cp -f /home/${PI_USER}/robot_ws/cyclonedds.xml /home/${PI_USER}/.cyclonedds.xml 2>/dev/null || true"
 
 echo "✅ Đã chuyển toàn bộ tệp tin sang Pi thành công!"
 
@@ -93,7 +122,7 @@ echo "✅ Đã đồng bộ giờ hệ thống!"
 
 # 4. Thực hiện colcon build trên Pi
 echo "🔨 Đang tiến hành colcon build trên Raspberry Pi..."
-ssh -o StrictHostKeyChecking=no "${PI_USER}@${PI_IP}" "bash -c 'source /opt/ros/jazzy/setup.bash 2>/dev/null || source /opt/ros/humble/setup.bash 2>/dev/null; cd /home/${PI_USER}/robot_ws && colcon build --symlink-install --packages-select my_robot_controller my_robot_bringup my_robot_navigation'"
+ssh -o StrictHostKeyChecking=no "${PI_USER}@${PI_IP}" "bash -c 'source /opt/ros/jazzy/setup.bash 2>/dev/null || source /opt/ros/humble/setup.bash 2>/dev/null; cd /home/${PI_USER}/robot_ws && colcon build --symlink-install --packages-select my_robot_controller my_robot_bringup my_robot_navigation encoder_odom && mkdir -p /home/${PI_USER}/robot_ws/install/my_robot_controller/share/my_robot_controller/models && cp -f /home/${PI_USER}/robot_ws/src/my_robot_controller/models/*.onnx /home/${PI_USER}/robot_ws/install/my_robot_controller/share/my_robot_controller/models/ 2>/dev/null || true'"
 
 echo ""
 echo "🎉 ============================================================"

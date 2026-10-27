@@ -36,7 +36,7 @@ ekf_filter_node_local:
       false, false, false,   # x, y, z
       false, false, false,   # roll, pitch, yaw
       true,  false, false,   # vx, vy, vz (Lấy vận tốc tiến Vx từ 4 bánh)
-      false, false, true,    # vroll, vpitch, vyaw (Bật Vyaw từ 4 bánh: giữ góc quay khi mất IMU)
+      false, false, false,   # vroll, vpitch, vyaw (TẮT vyaw từ bánh để chống trượt bánh làm sai lệch góc quay EKF)
       false, false, false    # ax, ay, az
     ]
     odom0_queue_size: 10
@@ -120,7 +120,7 @@ ekf_filter_node_global:
       false, false, false,
       false, false, false,
       true,  false, false,   # vx
-      false, false, true,    # vyaw (Bật Vyaw từ bánh xe)
+      false, false, false,   # vyaw (TẮT vyaw từ bánh: dùng hoàn toàn IMU Gyro để triệt tiêu trôi do trượt bánh)
       false, false, false
     ]
     odom0_queue_size: 10

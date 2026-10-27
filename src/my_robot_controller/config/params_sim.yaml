@@ -6,9 +6,9 @@
 cnn_driver_node:
   ros__parameters:
     # Đường dẫn model ONNX
-    model_path: 'models/crop_row_cnn_best_final.onnx'
-    input_height: 512
-    input_width: 512
+    model_path: 'models/crop_row_cnn_best.onnx'
+    input_height: 384
+    input_width: 384
     save_debug_imgs: false
 
     # Sử dụng bộ lọc màu HSV trong mô phỏng để vượt qua Domain Gap của ảnh giả lập

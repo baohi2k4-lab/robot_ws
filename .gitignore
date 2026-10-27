@@ -25,6 +25,9 @@ logs/
 # Video recordings & raw dataset images
 recordings/
 dataset/
+dataset_arrows/
+yolo_arrow_dataset/
+images/
 *.mp4
 inference_results/
 /*.png

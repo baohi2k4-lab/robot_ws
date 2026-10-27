@@ -41,7 +41,32 @@ def main():
     cam_available = os.path.exists(cam_device)
     test_image = None
 
-    if cam_available:
+    # Ưu tiên kiểm tra RealSense D435 trước
+    try:
+        import pyrealsense2 as rs
+        rs_ctx = rs.context()
+        if len(rs_ctx.query_devices()) > 0:
+            dev = rs_ctx.query_devices()[0]
+            d_name = dev.get_info(rs.camera_info.name)
+            d_sn = dev.get_info(rs.camera_info.serial_number)
+            print(f"  ✅ Tìm thấy cảm biến chuyên dụng: {d_name} (S/N: {d_sn}) qua USB 3.2")
+            rs_pipe = rs.pipeline()
+            rs_cfg = rs.config()
+            rs_cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+            rs_pipe.start(rs_cfg)
+            for _ in range(5): rs_pipe.wait_for_frames()
+            f = rs_pipe.wait_for_frames(2000)
+            cf = f.get_color_frame()
+            if cf:
+                test_image = np.asanyarray(cf.get_data())
+                h, w, c = test_image.shape
+                print(f"  ✅ Khung hình đọc trực tiếp từ {d_name}: {w}x{h} (3 kênh BGR) @ 30 FPS")
+                results["Camera"] = f"PASS ({d_name} S/N: {d_sn} {w}x{h})"
+            rs_pipe.stop()
+    except Exception:
+        pass
+
+    if test_image is None and cam_available:
         cam_name = "Camera thiết bị"
         name_path = f"/sys/class/video4linux/{os.path.basename(cam_device)}/name"
         if os.path.exists(name_path):
@@ -100,29 +125,35 @@ def main():
     # ─────────────────────────────────────────────────────────────────
     # 2. KIỂM TRA MODEL ONNX & KÍCH THƯỚC ĐẦU VÀO
     # ─────────────────────────────────────────────────────────────────
-    print("\n[BƯỚC 2/6] Kiểm tra Model ONNX & Cấu hình Suy luận:")
+    print("\n[BƯỚC 2/6] Kiểm tra Model ONNX (Crop-Row CNN + YOLO Arrow) & Cấu hình Suy luận:")
     import onnxruntime as ort
-    model_rel_path = "src/my_robot_controller/models/crop_row_cnn_best_final_int8.onnx"
+    model_rel_path = "src/my_robot_controller/models/crop_row_cnn_best.onnx"
     if not os.path.exists(os.path.join(WS_DIR, model_rel_path)):
         model_rel_path = "src/my_robot_controller/models/crop_row_cnn_best_final.onnx"
     model_full_path = os.path.join(WS_DIR, model_rel_path)
 
     if os.path.exists(model_full_path):
         size_mb = os.path.getsize(model_full_path) / (1024 * 1024)
-        is_int8 = "int8" in os.path.basename(model_full_path).lower()
-        model_type = "INT8 Quantized (Tối ưu Pi)" if is_int8 else "FP32 Gốc"
-        print(f"  ✅ Tìm thấy file model ONNX: {model_rel_path} ({size_mb:.2f} MB - {model_type})")
+        model_type = "UNet-ResNet34 (Embedded Sigmoid 384x384)"
+        print(f"  ✅ Tìm thấy file model CNN : {model_rel_path} ({size_mb:.2f} MB - {model_type})")
         
         session = ort.InferenceSession(model_full_path, providers=['CPUExecutionProvider'])
         inp = session.get_inputs()[0]
         outp = session.get_outputs()[0]
-        print(f"  ✅ Cấu hình đầu vào Model : Name='{inp.name}', Shape={inp.shape}")
-        print(f"  ✅ Cấu hình đầu ra Model  : Name='{outp.name}', Shape={outp.shape}")
-        results["ONNX Model"] = f"PASS ({size_mb:.1f} MB, {model_type})"
+        print(f"  ✅ Cấu hình đầu vào CNN   : Name='{inp.name}', Shape={inp.shape}")
+        print(f"  ✅ Cấu hình đầu ra CNN    : Name='{outp.name}', Shape={outp.shape}")
+        results["ONNX CNN Model"] = f"PASS ({size_mb:.1f} MB, {model_type})"
     else:
         print(f"  ❌ Không tìm thấy model tại: {model_full_path}")
-        results["ONNX Model"] = "FAIL (File not found)"
+        results["ONNX CNN Model"] = "FAIL (File not found)"
         return
+
+    yolo_rel_path = "src/my_robot_controller/models/bao1.onnx"
+    yolo_full_path = os.path.join(WS_DIR, yolo_rel_path)
+    if os.path.exists(yolo_full_path):
+        yolo_mb = os.path.getsize(yolo_full_path) / (1024 * 1024)
+        print(f"  ✅ Tìm thấy file model YOLO: {yolo_rel_path} ({yolo_mb:.2f} MB - Arrow Detector 640x640)")
+        results["ONNX YOLO Model"] = f"PASS ({yolo_mb:.1f} MB, bao1.onnx)"
 
     # ─────────────────────────────────────────────────────────────────
     # 3. KIỂM TRA SUY LUẬN & TRÍCH XUẤT GÓC LÁI (INFERENCE HANDLER)
@@ -168,18 +199,18 @@ def main():
     smc = TrackingControllerSMC()
     smc.initialize(
         lambda_smc=2.0,
-        k_smc=3.5,
-        eta_smc=0.6,
+        k_smc=2.8,
+        eta_smc=0.25,
         phi_smc=0.5,
-        linear_speed=0.30,
-        turn_angular_speed=0.60
+        linear_speed=0.07,
+        turn_angular_speed=0.25
     )
     cmd = smc.compute_command(heading_err, dt_actual=0.05)
     v_lin = cmd["linear_velocity"]
     w_ang = cmd["angular_velocity"]
     print(f"  ✅ Bộ điều khiển SMC tính toán lệnh /cmd_vel:")
-    print(f"     • Vận tốc bám luống (Linear x) = {v_lin:.2f} m/s (Chuẩn 0.3 m/s)")
-    print(f"     • Vận tốc bẻ lái (Angular z)   = {w_ang:.3f} rad/s (Giới hạn tối đa 0.60 rad/s - Gấp đôi)")
+    print(f"     • Vận tốc bám luống (Linear x) = {v_lin:.2f} m/s (Chuẩn 0.07 m/s đầm êm, 775 220 RPM)")
+    print(f"     • Vận tốc bẻ lái (Angular z)   = {w_ang:.3f} rad/s (Giới hạn tối đa 0.25 rad/s)")
     results["FSM & SMC"] = f"PASS (v={v_lin:.2f} m/s, w={w_ang:.3f} rad/s)"
 
     # ─────────────────────────────────────────────────────────────────
@@ -235,7 +266,7 @@ def main():
     print_header("KẾT QUẢ CHẨN ĐOÁN TOÀN DIỆN")
     for comp, status in results.items():
         print(f"  • {comp:<20}: {status}")
-    print("\n🚀 KẾT LUẬN: Chuỗi thuật toán AI CNN (512x512 -> Góc lái -> FSM -> SMC -> ESP32) ĐÃ SẴN SÀNG ĐỂ CHẠY!")
+    print("\n🚀 KẾT LUẬN: Chuỗi thuật toán AI CNN (384x384) + YOLO Arrow (640x640) -> FSM -> SMC (0.05 m/s) -> ESP32 ĐÃ SẴN SÀNG ĐỂ CHẠY!")
     print("=" * 70 + "\n")
 
 if __name__ == '__main__':

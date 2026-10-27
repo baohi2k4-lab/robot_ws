@@ -33,11 +33,11 @@ class CnnInferenceServer(Node):
         super().__init__('cnn_inference_server')
 
         # ── Parameters ────────────────────────────────────────────────
-        self.declare_parameter('model_path', 'models/crop_row_cnn_best_final_int8.onnx')
+        self.declare_parameter('model_path', 'models/crop_row_cnn_best.onnx')
         self.declare_parameter('input_height', 384)
         self.declare_parameter('input_width', 384)
-        self.declare_parameter('mask_threshold', 0.30)
-        self.declare_parameter('max_steering_angle_deg', 14.0)
+        self.declare_parameter('mask_threshold', 0.35)
+        self.declare_parameter('max_steering_angle_deg', 16.0)
         self.declare_parameter('num_threads', 0)
         self.declare_parameter('show_window', False)
 
@@ -52,7 +52,7 @@ class CnnInferenceServer(Node):
 
         # Tự động tìm model ONNX nếu đường dẫn tương đối
         if not os.path.exists(self.model_path):
-            candidate_names = [os.path.basename(self.model_path), 'crop_row_cnn_best_final_int8.onnx', 'crop_row_cnn_best_final.onnx']
+            candidate_names = [os.path.basename(self.model_path), 'crop_row_cnn_best.onnx', 'crop_row_cnn_best_final.onnx', 'crop_row_cnn_best_final_int8.onnx']
             try:
                 from ament_index_python.packages import get_package_share_directory
                 share_dir = get_package_share_directory('my_robot_controller')
