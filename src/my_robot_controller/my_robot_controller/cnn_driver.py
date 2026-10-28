@@ -14,7 +14,10 @@ import time
 import math
 import cv2
 import rclpy
+import threading
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import Image, LaserScan, NavSatFix, NavSatStatus, Imu
 from geometry_msgs.msg import Twist, Point, PoseStamped
@@ -385,6 +388,23 @@ class CnnDriverNode(Node):
         self._good_row_yaw_ema   = 0.0
         self._good_row_yaw_valid = False
 
+        # ── Bộ dừng quay nhanh theo IMU (Fast Turn Guard, chạy luồng riêng ~50Hz) ──
+        # Vòng camera chỉ ~5-10 FPS khi chạy YOLO -> dừng quay 90° bằng camera bị trễ 1 khung (~5°).
+        # Khi đang xoay 90° (Nhịp 1 & 3), callback IMU tự phát lệnh xoay và tự cắt lệnh ngay khi đủ góc.
+        self._turn_lock            = threading.Lock()
+        self._fast_turn_active     = False
+        self._fast_turn_reached    = False
+        self._fast_turn_target_yaw = 0.0
+        self._fast_turn_sign       = -1.0
+        self._last_imu_cb_time     = 0.0
+        self._suppress_cmd_publish = False
+        self._drive_out_ref_valid  = False   # drive_out_target_yaw vừa được chốt cho lượt Luống 1 -> 2
+        self.uturn_row1_yaw        = 0.0     # Hướng chuẩn tim Luống 1 (tham chiếu tuyệt đối cho 2 lần quay 90°)
+        self.uturn_turn1_target_yaw = 0.0    # Hướng lý tưởng sau Nhịp 1 (Luống 1 + 90°)
+        self._last_black_seen_time = 0.0
+        self._last_black_seen_yaw  = 0.0
+        self.turn_stop_lead_sec    = 0.12    # s — bù trễ dừng (IMU + bridge + ESP32) theo tốc độ quay thực tế
+
         # Recovery tracking variables
         self.recovery_start_x   = 0.0
         self.recovery_start_y   = 0.0
@@ -446,12 +466,15 @@ class CnnDriverNode(Node):
         self.gps_sub = self.create_subscription(
             NavSatFix, self.gps_topic, self.gps_callback, 10)
 
+        # IMU chạy trong nhóm callback riêng (luồng riêng) để Fast Turn Guard phản ứng ~50Hz
+        # ngay cả khi image_callback đang bận suy luận YOLO/CNN (onnxruntime nhả GIL khi chạy).
+        self._imu_cb_group = MutuallyExclusiveCallbackGroup()
         self.imu_sub = self.create_subscription(
-            Imu, self.imu_topic, self.imu_callback, 10)
+            Imu, self.imu_topic, self.imu_callback, 10, callback_group=self._imu_cb_group)
         # Fallback subscription for alternative imu topic
         if self.imu_topic not in ('/imu', 'imu'):
             self.imu_fallback_sub = self.create_subscription(
-                Imu, '/imu', self.imu_callback, 10)
+                Imu, '/imu', self.imu_callback, 10, callback_group=self._imu_cb_group)
 
         # ── Remote CNN Offloading (Laptop gánh phần suy luận ONNX) ───────
         # QoS BEST_EFFORT + depth=1: bỏ gói cũ, chỉ dùng kết quả mới nhất
@@ -1168,9 +1191,84 @@ class CnnDriverNode(Node):
         else:
             self._prev_wheel_yaw_for_turn = None
 
+    # ------------------------------------------------------------------
+    # FAST TURN GUARD — điều khiển xoay 90° theo IMU ở tần số cao (luồng IMU riêng)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _wrap_angle(a):
+        return math.atan2(math.sin(a), math.cos(a))
+
+    def _turn_remaining_deg(self, current_imu_yaw):
+        """Góc còn phải quay (độ) theo đúng chiều quay. Âm = đã quay lố đích."""
+        err = self._wrap_angle(self._fast_turn_target_yaw - current_imu_yaw)
+        return math.degrees(err) * self._fast_turn_sign
+
+    def _turn_rate_for_remaining(self, rem_deg, gyro_dps, phase_elapsed):
+        """Tốc độ xoay theo góc còn lại: mạnh khi còn xa, hạ dần ở 25° cuối để dừng đúng 90° không lố."""
+        base = float(self.turn_angular_speed)
+        if rem_deg > 25.0:
+            rate = base
+            # Bù lực khi cỏ cản (gyro thực < 55% lệnh) — chỉ khi còn xa đích để không văng lố
+            if phase_elapsed > 0.6 and gyro_dps < 0.55 * math.degrees(rate):
+                rate = min(0.56, rate * 1.25)
+        elif rem_deg > 10.0:
+            rate = max(0.30, base * 0.72)
+        else:
+            rate = 0.28
+        return rate
+
+    def _arm_fast_turn(self, target_yaw, turn_sign):
+        with self._turn_lock:
+            self._fast_turn_target_yaw = float(target_yaw)
+            self._fast_turn_sign = float(turn_sign)
+            self._fast_turn_reached = False
+            self._fast_turn_active = True
+
+    def _disarm_fast_turn_and_stop(self):
+        with self._turn_lock:
+            self._fast_turn_active = False
+            self.StopRobot()
+
+    def _imu_is_fresh(self, max_age=0.25):
+        return (time.time() - self._last_imu_cb_time) < max_age
+
+    def _fast_turn_step(self, current_imu_yaw):
+        with self._turn_lock:
+            if not self._fast_turn_active or self._fast_turn_reached:
+                return
+            st = self.fsm.get_state()
+            in_turn_phase = (
+                st == FSMState.PATH_FOLLOWING and
+                self.fsm.state_before_planning == FSMState.UTURN_PLANNING and
+                getattr(self, 'uturn_step_phase', '') in ('TURN_90_TO_BLACK', 'TURN_90_INTO_ROW2')
+            )
+            if not in_turn_phase:
+                self._fast_turn_active = False
+                return
+
+            rem_deg = self._turn_remaining_deg(current_imu_yaw)
+            gyro_dps = abs(math.degrees(self.localization_manager.imu_angular_vel_z))
+            # Dừng sớm một góc bằng quãng quay thêm do trễ (gyro * lead), kẹp 1.0° - 6.0°
+            lead_deg = float(np.clip(gyro_dps * self.turn_stop_lead_sec, 1.0, 6.0))
+            if rem_deg <= lead_deg:
+                self._fast_turn_reached = True
+                self._fast_turn_active = False
+                self.cmd_vel_pub.publish(Twist())
+                return
+
+            phase_elapsed = self.get_clock().now().nanoseconds / 1e9 - getattr(self, 'uturn_phase_start_time', 0.0)
+            twist = Twist()
+            twist.angular.z = float(self._fast_turn_sign * self._turn_rate_for_remaining(rem_deg, gyro_dps, phase_elapsed))
+            self.cmd_vel_pub.publish(twist)
+
     def imu_callback(self, msg: Imu):
         self.localization_manager.update_imu(msg)
         current_imu_yaw = self.localization_manager.imu_yaw
+        self._last_imu_cb_time = time.time()
+
+        # 0. Fast Turn Guard: cắt lệnh xoay ngay khi đủ 90° (không chờ khung hình camera)
+        if self._fast_turn_active:
+            self._fast_turn_step(current_imu_yaw)
 
         # 1. Tích lũy góc quay thực tế từ IMU khi xe đang quay đầu
         is_uturn_active = (
@@ -1998,6 +2096,7 @@ class CnnDriverNode(Node):
                         # Dùng góc IMU trung bình "tốt" (EMA khi CNN bám ổn) thay vì góc tức thời
                         self.drive_out_target_yaw = self._good_row_yaw_ema if self._good_row_yaw_valid else self.localization_manager.imu_yaw
                         self._good_row_yaw_valid = False  # Reset sau khi đã sử dụng
+                        self._drive_out_ref_valid = True  # Chốt hướng tim Luống 1 làm tham chiếu 2 lần quay 90°
                         self._is_final_goal = False
                         self.transition_to_state(FSMState.DRIVE_OUT, now)
                         return
@@ -2073,6 +2172,7 @@ class CnnDriverNode(Node):
                     # Dùng góc IMU trung bình "tốt" nếu có (chính xác hơn góc tức thời khi hết nhìn thấy hàng)
                     self.drive_out_target_yaw = self._good_row_yaw_ema if self._good_row_yaw_valid else self.localization_manager.imu_yaw
                     self._good_row_yaw_valid = False
+                    self._drive_out_ref_valid = True  # Chốt hướng tim Luống 1 làm tham chiếu 2 lần quay 90°
                     self.drive_out_start_time = now_sec
                     if self.current_lane_idx == 1:
                         self.current_lane_idx = 2
@@ -2220,11 +2320,31 @@ class CnnDriverNode(Node):
             self.uturn_start_x = self.current_x
             self.uturn_start_y = self.current_y
             self.uturn_start_imu_yaw = self.localization_manager.imu_yaw
-            # Luống 2 ngược chiều Luống 1 (+180°):
-            self.uturn_target_yaw = math.atan2(
-                math.sin(self.uturn_start_imu_yaw + math.pi),
-                math.cos(self.uturn_start_imu_yaw + math.pi)
+
+            # Ưu tiên lấy hướng chuẩn của tim Luống 1 (drive_out_target_yaw hoặc _good_row_yaw_ema)
+            # để bù lại vài độ xe đã bẻ lái khi bám Mũi tên Vàng trong DRIVE_OUT -> Quay đúng 90° vuông góc Luống 1!
+            row1_yaw_candidate = self.uturn_start_imu_yaw
+            if getattr(self, '_drive_out_ref_valid', False):
+                row1_yaw_candidate = float(getattr(self, 'drive_out_target_yaw', self.uturn_start_imu_yaw))
+                self._drive_out_ref_valid = False
+            elif getattr(self, '_good_row_yaw_valid', False):
+                row1_yaw_candidate = float(self._good_row_yaw_ema)
+                self._good_row_yaw_valid = False
+
+            if abs(self._wrap_angle(self.uturn_start_imu_yaw - row1_yaw_candidate)) <= math.radians(25.0):
+                self.uturn_row1_yaw = row1_yaw_candidate
+            else:
+                self.uturn_row1_yaw = self.uturn_start_imu_yaw
+
+            turn_sign = -1.0 if self.turn_side.upper() == 'RIGHT' else 1.0
+            target_turn1_deg = float(getattr(self, 'yellow_arrow_turn_angle_deg', 90.0))
+
+            # Hướng đích sau Nhịp 1 (vuông góc 90° so với Luống 1) & Hướng đích Luống 2 (ngược chiều 180° so với Luống 1):
+            self.uturn_turn1_target_yaw = self._wrap_angle(
+                self.uturn_row1_yaw + turn_sign * math.radians(target_turn1_deg)
             )
+            self.uturn_target_yaw = self._wrap_angle(self.uturn_row1_yaw + math.pi)
+
             self.uturn_accum_imu_yaw = 0.0
             self.uturn_accum_wheel_yaw = 0.0
             self._prev_imu_yaw_for_turn = self.uturn_start_imu_yaw
@@ -2232,20 +2352,32 @@ class CnnDriverNode(Node):
             self._slip_warning_logged = False
             self.is_trimming_uturn_heading = False
 
-            # Khởi tạo Chu trình Quay đầu 2 Nhịp (Nhịp 1: Quay 90° tại Mũi tên Vàng -> Nhịp 2: Tiến tới Mũi tên Đen -> Nhịp 3: Quay 90° vào Luống 2):
-            #   Phase 1 ('TURN_90_TO_BLACK'): Tại Mũi tên Vàng (<=0.5m), quay phải 90° (4 bánh quay ngược chiều cực khỏe) để nhìn thấy rõ Mũi tên Đen.
+            # Reset bộ nhớ nhận diện Mũi tên Đen cho chu trình quay đầu mới:
+            if hasattr(self, 'arrow_detector') and self.arrow_detector:
+                self.arrow_detector.reset_confirmation()
+            self._last_black_seen_time = 0.0
+            self._last_black_dist = float('inf')
+            self._last_black_off = 0.0
+            self._last_black_seen_dist_odom = 0.0
+
+            # Khởi tạo Chu trình Quay đầu 4 Pha:
+            #   Phase 1 ('TURN_90_TO_BLACK'): Tại Mũi tên Vàng (<=0.5m), quay phải đúng 90° để nhìn thẳng vào Mũi tên Đen.
             #   Phase 2 ('APPROACH_BLACK_05M'): Chạy thẳng bám tâm Mũi tên Đen cho đến khi cách Mũi tên Đen <= 0.50m.
-            #   Phase 3 ('TURN_90_INTO_ROW2'): Reset mốc IMU cục bộ, quay thêm ~90° (4 bánh ngược chiều khỏe) cho đến khi CNN + LiDAR khóa trúng tim Luống 2.
+            #   Phase 3 ('TURN_90_INTO_ROW2'): Tại Mũi tên Đen (<=0.5m), quay phải 90° lần 2 vào miệng Luống 2.
+            #   Phase 4 ('ALIGN_ROW2_CENTER'): Canh chỉnh thẳng hàng & giữa tim Luống 2 trước khi chạy CNN.
             self.uturn_step_phase = 'TURN_90_TO_BLACK'
-            self.uturn_phase_start_yaw = self.uturn_start_imu_yaw
+            self.uturn_phase_start_yaw = self.uturn_row1_yaw
             self.uturn_phase_start_time = now.nanoseconds / 1e9
             self.uturn_phase_start_x = self.current_x
             self.uturn_phase_start_y = self.current_y
-            target_turn1_deg = float(getattr(self, 'yellow_arrow_turn_angle_deg', 90.0))
+
+            # Kích hoạt Fast Turn Guard 50Hz trên luồng IMU riêng để dừng đúng 90° không bị trễ frame camera
+            self._arm_fast_turn(self.uturn_turn1_target_yaw, turn_sign)
 
             self.get_logger().info(
-                f"🔄 [QUAY ĐẦU MŨI TÊN VÀNG -> MŨI TÊN ĐEN] Bắt đầu Nhịp 1 (Quay {target_turn1_deg:.0f}° bằng 4 bánh ngược chiều từ Mũi tên Vàng tìm Mũi tên Đen) | "
-                f"IMU gốc={math.degrees(self.uturn_start_imu_yaw):+.1f}°, turn_side={self.turn_side}..."
+                f"🔄 [QUAY ĐẦU MŨI TÊN VÀNG -> MŨI TÊN ĐEN] Bắt đầu Nhịp 1 (Quay {target_turn1_deg:.0f}° từ Mũi tên Vàng tìm Mũi tên Đen) | "
+                f"IMU Luống 1={math.degrees(self.uturn_row1_yaw):+.1f}°, IMU hiện tại={math.degrees(self.uturn_start_imu_yaw):+.1f}°, "
+                f"Đích Nhịp 1={math.degrees(self.uturn_turn1_target_yaw):+.1f}°..."
             )
             
             # Reset U-turn turn tracking variables
@@ -2282,49 +2414,77 @@ class CnnDriverNode(Node):
             if is_uturn:
                 now_sec = now.nanoseconds / 1e9
                 current_imu_yaw = self.localization_manager.imu_yaw
+                gyro_dps = abs(math.degrees(getattr(self.localization_manager, 'imu_angular_vel_z', 0.0)))
                 turn_sign = -1.0 if self.turn_side.upper() == 'RIGHT' else 1.0
                 phase = getattr(self, 'uturn_step_phase', 'TURN_90_TO_BLACK')
                 phase_elapsed = now_sec - getattr(self, 'uturn_phase_start_time', now_sec)
 
-                # Góc quay cục bộ tính từ đầu mỗi pha (tránh tích lũy sai số dài hạn của IMU)
-                phase_dyaw_rad = math.atan2(
-                    math.sin(current_imu_yaw - getattr(self, 'uturn_phase_start_yaw', current_imu_yaw)),
-                    math.cos(current_imu_yaw - getattr(self, 'uturn_phase_start_yaw', current_imu_yaw))
+                # Góc quay cục bộ tính từ đầu mỗi pha
+                phase_dyaw_rad = self._wrap_angle(
+                    current_imu_yaw - getattr(self, 'uturn_phase_start_yaw', current_imu_yaw)
                 )
                 phase_turned_deg = abs(math.degrees(phase_dyaw_rad))
 
-                black_det = bool(arrow_res and arrow_res['black_arrow']['detected'])
-                black_dist = float(arrow_res['black_arrow']['depth_m']) if black_det else float('inf')
-                black_off = float(arrow_res['black_arrow']['offset_x']) if black_det else 0.0
+                # Nhận diện Mũi tên Đen (Điều kiện 2):
+                # Trong pha quay đầu & tiếp cận, chấp nhận cả raw_detected (conf >= 0.32) để không bị trễ 3 frame (~0.6s)
+                black_info = arrow_res['black_arrow'] if arrow_res else None
+                black_raw_det = bool(black_info and (black_info.get('detected', False) or black_info.get('raw_detected', False)))
+                black_conf = float(black_info.get('confidence', 0.0)) if black_info else 0.0
+                black_det = black_raw_det and (black_conf >= 0.32)
+                black_dist = float(black_info['depth_m']) if black_det else float('inf')
+                black_off = float(black_info['offset_x']) if black_det else 0.0
                 b_thresh = float(getattr(self, 'black_arrow_turn_dist', 0.50))
                 target_turn1_deg = float(getattr(self, 'yellow_arrow_turn_angle_deg', 90.0))
 
+                if black_det and math.isfinite(black_dist):
+                    self._last_black_seen_time = now_sec
+                    self._last_black_dist = black_dist
+                    self._last_black_off = black_off
+                    self._last_black_seen_yaw = current_imu_yaw
+
                 # ── PHA 1: QUAY 90° TỪ MŨI TÊN VÀNG (ĐIỀU KIỆN 1) ĐỂ TÌM MŨI TÊN ĐEN (ĐIỀU KIỆN 2) ──
                 if phase == 'TURN_90_TO_BLACK':
-                    # Điều kiện chốt bằng Thị giác (Visual Lock): Bắt buộc đã mở góc >= 75° VÀ thấy Mũi tên Đen nằm ngay tâm khung hình camera!
-                    visual_locked_black = black_det and (abs(black_off) <= 0.16) and (phase_turned_deg >= 75.0)
-                    # Quay đủ 90° (88.5° - 90.0° theo IMU, hoặc quá thời gian an toàn 16.0s) để camera nhìn thẳng về phía Điều kiện 2 (Mũi tên Đen)
-                    imu_90_done = (phase_turned_deg >= (target_turn1_deg - 1.5)) or (phase_elapsed >= 16.0)
+                    turn1_target_yaw = getattr(self, 'uturn_turn1_target_yaw', self.uturn_phase_start_yaw + turn_sign * math.radians(target_turn1_deg))
+                    rem_deg = math.degrees(self._wrap_angle(turn1_target_yaw - current_imu_yaw)) * turn_sign
+                    lead_deg = float(np.clip(gyro_dps * self.turn_stop_lead_sec, 1.0, 6.0))
+
+                    # Điều kiện chốt bằng Thị giác (Visual Lock): Đã quay >= 75° VÀ thấy Mũi tên Đen nằm gần tâm khung hình camera!
+                    visual_locked_black = black_det and (abs(black_off) <= 0.18) and (phase_turned_deg >= 75.0)
+                    # Quay đủ 90° (Fast Turn Guard 50Hz đã cắt lệnh, hoặc góc còn lại <= lead_deg, hoặc quá thời gian an toàn 16.0s)
+                    imu_90_done = (
+                        self._fast_turn_reached or
+                        (rem_deg <= lead_deg) or
+                        (phase_turned_deg >= (target_turn1_deg - lead_deg)) or
+                        (phase_elapsed >= 16.0)
+                    )
 
                     if visual_locked_black or imu_90_done:
-                        reason = f"YOLO khóa trúng MŨI TÊN ĐEN (off={black_off:+.2f}, dist={black_dist:.2f}m, góc={phase_turned_deg:.1f}°)" if visual_locked_black else f"Đạt góc {target_turn1_deg:.0f}° ({phase_turned_deg:.1f}°)"
+                        self._disarm_fast_turn_and_stop()
+                        reason = (
+                            f"YOLO khóa trúng MŨI TÊN ĐEN (off={black_off:+.2f}, dist={black_dist:.2f}m, góc={phase_turned_deg:.1f}°)"
+                            if visual_locked_black else
+                            f"Đạt góc chuẩn {target_turn1_deg:.0f}° (đã quay={phase_turned_deg:.1f}°, còn={rem_deg:+.1f}°)"
+                        )
                         self.get_logger().info(
                             f"✅ [NHỊP 1 HOÀN TẤT] Đã quay phải 90° lần 1 ({reason})! "
                             f"Chuyển sang Nhịp 2: Chạy thẳng bám tâm MŨI TÊN ĐEN đến cự ly <= {b_thresh:.2f}m..."
                         )
                         self.uturn_step_phase = 'APPROACH_BLACK_05M'
-                        self.uturn_phase_start_yaw = current_imu_yaw
+                        # Giữ hướng vuông góc 90° chuẩn (hoặc hướng khóa Mũi tên Đen) làm hướng tham chiếu chạy ngang
+                        self.uturn_phase_start_yaw = current_imu_yaw if visual_locked_black else turn1_target_yaw
                         self.uturn_phase_start_time = now_sec
                         self.uturn_phase_start_x = self.current_x
                         self.uturn_phase_start_y = self.current_y
-                        self.StopRobot()
+                        self._last_black_seen_dist_odom = 0.0
                         return
                     else:
-                        # Xoay tại chỗ 4 bánh ngược chiều cực khỏe, giảm tốc mượt khi còn cách đích < 15° để dừng chuẩn 90° không trượt lố
-                        rem_deg = max(0.0, target_turn1_deg - phase_turned_deg)
-                        turn_rate = float(self.turn_angular_speed) if rem_deg > 15.0 else max(0.32, float(self.turn_angular_speed) * 0.78)
-                        twist.linear.x = 0.0
-                        twist.angular.z = float(turn_sign * turn_rate)
+                        # Nếu luồng IMU 50Hz đang hoạt động tươi, để luồng IMU phát lệnh xoay & ngắt tức thì tại 90°
+                        if self._imu_is_fresh() and self._fast_turn_active:
+                            self._suppress_cmd_publish = True
+                        else:
+                            turn_rate = self._turn_rate_for_remaining(max(0.0, rem_deg), gyro_dps, phase_elapsed)
+                            twist.linear.x = 0.0
+                            twist.angular.z = float(turn_sign * turn_rate)
 
                 # ── PHA 2: CHẠY TỚI MŨI TÊN ĐEN (CÁCH 0.50M) BẰNG VISUAL SERVOING ────────
                 elif phase == 'APPROACH_BLACK_05M':
@@ -2332,46 +2492,65 @@ class CnnDriverNode(Node):
                         self.current_x - getattr(self, 'uturn_phase_start_x', self.current_x),
                         self.current_y - getattr(self, 'uturn_phase_start_y', self.current_y)
                     )
+                    if black_det and math.isfinite(black_dist):
+                        self._last_black_seen_dist_odom = step_dist
+
+                    # Hỗ trợ bộ nhớ ngắn hạn (0.9s) nếu Mũi tên Đen vừa được thấy ở cự ly gần rồi khuất 1-2 frame:
+                    black_recent = ((now_sec - getattr(self, '_last_black_seen_time', 0.0)) <= 0.9) and math.isfinite(getattr(self, '_last_black_dist', float('inf')))
+                    dist_since_seen = max(0.0, step_dist - getattr(self, '_last_black_seen_dist_odom', step_dist))
+                    eff_black_dist = black_dist if black_det else (max(0.16, self._last_black_dist - dist_since_seen) if black_recent else float('inf'))
+                    eff_black_off = black_off if black_det else (self._last_black_off if black_recent else 0.0)
+
                     # Điều kiện dừng tiến Nhịp 2: Cự ly tới Mũi tên Đen <= 0.50m (hoặc đã đi đủ bề rộng luống row_spacing)
-                    reached_black_05m = black_det and (0.15 < black_dist <= (b_thresh + 0.05))
+                    reached_black_05m = (black_det or black_recent) and (0.15 < eff_black_dist <= (b_thresh + 0.04))
                     fallback_dist_done = (step_dist >= self.row_spacing) or (phase_elapsed >= 40.0)
 
                     if reached_black_05m or fallback_dist_done:
-                        reason = f"Cự ly MŨI TÊN ĐEN = {black_dist:.2f}m <= {b_thresh:.2f}m" if reached_black_05m else f"Quãng đường ngang = {step_dist:.2f}m"
+                        self._disarm_fast_turn_and_stop()
+                        reason = f"Cự ly MŨI TÊN ĐEN = {eff_black_dist:.2f}m <= {b_thresh:.2f}m" if reached_black_05m else f"Quãng đường ngang = {step_dist:.2f}m"
                         self.get_logger().info(
                             f"🎯 [ĐIỀU KIỆN 2 THÀNH CÔNG - NHỊP 2 HOÀN TẤT] Đã tiến sát MŨI TÊN ĐEN ({reason})! "
-                            f"Reset mốc IMU tại chỗ và kích hoạt Nhịp 3: Quay 90° lần 2 vào tâm Luống 2..."
+                            f"Kích hoạt Nhịp 3: Quay phải 90° lần 2 vào tâm Luống 2..."
                         )
-                        # RESET MỐC IMU TẠI MŨI TÊN ĐEN: Xóa bỏ hoàn toàn mọi trôi góc tích lũy trước đó!
+                        # Tính góc đích Nhịp 3: Quay 90° từ hướng hiện tại VÀ ưu tiên khớp với hướng ngược chiều Luống 1 (+180°)
+                        local_turn2_target = self._wrap_angle(current_imu_yaw + turn_sign * math.radians(90.0))
+                        if abs(self._wrap_angle(self.uturn_target_yaw - local_turn2_target)) <= math.radians(22.0):
+                            self.uturn_turn2_target_yaw = self.uturn_target_yaw
+                        else:
+                            self.uturn_turn2_target_yaw = local_turn2_target
+                            self.uturn_target_yaw = local_turn2_target
+
                         self.uturn_step_phase = 'TURN_90_INTO_ROW2'
                         self.uturn_phase_start_yaw = current_imu_yaw
                         self.uturn_phase_start_time = now_sec
-                        self.StopRobot()
+                        self._arm_fast_turn(self.uturn_turn2_target_yaw, turn_sign)
                         return
                     else:
                         # Chạy tiến về phía Mũi tên Đen ở đúng 0.07 m/s, dùng Camera YOLO giữ Mũi tên Đen ngay chính giữa khung hình
                         twist.linear.x = float(self.turn_linear_speed)
-                        if black_det:
-                            # Visual Servoing: bẻ lái trực tiếp theo độ lệch tâm của Mũi tên Đen (không sợ IMU trôi)
-                            twist.angular.z = float(np.clip(-1.1 * black_off, -0.45, 0.45))
+                        if black_det or black_recent:
+                            # Visual Servoing: bẻ lái trực tiếp theo độ lệch tâm của Mũi tên Đen
+                            twist.angular.z = float(np.clip(-1.1 * eff_black_off, -0.42, 0.42))
+                            if black_det and abs(black_off) <= 0.12:
+                                self.uturn_phase_start_yaw = current_imu_yaw
                         else:
-                            # Giữ hướng thẳng tạm thời nếu 1-2 frame bị khuất
-                            yaw_hold_err = math.atan2(
-                                math.sin(self.uturn_phase_start_yaw - current_imu_yaw),
-                                math.cos(self.uturn_phase_start_yaw - current_imu_yaw)
-                            )
-                            twist.angular.z = float(np.clip(1.0 * yaw_hold_err, -0.25, 0.25))
+                            # Giữ hướng vuông góc 90° chuẩn khi đang tiến lại gần Mũi tên Đen
+                            yaw_hold_err = self._wrap_angle(self.uturn_phase_start_yaw - current_imu_yaw)
+                            twist.angular.z = float(np.clip(1.2 * yaw_hold_err, -0.28, 0.28))
 
                 # ── PHA 3: QUAY 90° LẦN 2 TỪ MŨI TÊN ĐEN VÀO MIỆNG LUỐNG 2 ──
                 elif phase == 'TURN_90_INTO_ROW2':
+                    turn2_target_yaw = getattr(self, 'uturn_turn2_target_yaw', self.uturn_target_yaw)
+                    rem_deg = math.degrees(self._wrap_angle(turn2_target_yaw - current_imu_yaw)) * turn_sign
+                    lead_deg = float(np.clip(gyro_dps * self.turn_stop_lead_sec, 1.0, 6.0))
+
                     # Quét miệng Luống 2 bằng LiDAR C1
                     docking_info = self.lidar_processor.get_row_entrance_centering(
                         min_fwd=0.20, max_fwd=1.80, expected_row_spacing=self.row_spacing
                     )
                     lidar_centered = docking_info["detected"] and (abs(docking_info["lateral_offset"]) <= 0.12)
 
-                    # Bắt buộc xe phải quay đủ >= 78° (và CNN + LiDAR đã khóa thẳng tâm Luống 2) HOẶC đủ 88.5° (~90°):
-                    # Tuyệt đối không thoát sớm theo thời gian khi chưa quay đủ góc!
+                    # Bắt buộc xe phải quay đủ >= 78° (và CNN + LiDAR đã khóa thẳng tâm Luống 2) HOẶC đủ 90° theo IMU:
                     cnn_locked_row2 = (
                         (phase_turned_deg >= 78.0) and
                         (confidence >= 0.48) and
@@ -2379,14 +2558,19 @@ class CnnDriverNode(Node):
                         (abs(raw_angle) <= 6.0)
                     )
                     lidar_cnn_ready = (phase_turned_deg >= 80.0) and lidar_centered and (confidence >= 0.40) and (abs(raw_angle) <= 8.0)
-                    imu_90_second_done = (phase_turned_deg >= 88.5) or (phase_elapsed >= 16.0)
+                    imu_90_second_done = (
+                        self._fast_turn_reached or
+                        (rem_deg <= lead_deg) or
+                        (phase_turned_deg >= (90.0 - lead_deg)) or
+                        (phase_elapsed >= 16.0)
+                    )
 
                     if cnn_locked_row2 or lidar_cnn_ready or imu_90_second_done:
-                        self.StopRobot()
+                        self._disarm_fast_turn_and_stop()
                         self.get_logger().info(
-                            f"✅ [NHỊP 3 HOÀN TẤT - ĐÃ QUAY {phase_turned_deg:.1f}°] "
+                            f"✅ [NHỊP 3 HOÀN TẤT - ĐÃ QUAY {phase_turned_deg:.1f}° (còn={rem_deg:+.1f}°)] "
                             f"CNN Conf={confidence*100:.1f}%, Steer={raw_angle:+.1f}°, Offset={lane_offset:+.2f} | "
-                            f"Chuyển sang Nhịp 4 (ALIGN_ROW2_CENTER): Canh chỉnh giữa Luống 2 trước khi chạy CNN..."
+                            f"Chuyển sang Nhịp 4 (ALIGN_ROW2_CENTER): Canh chỉnh thẳng hàng Luống 2 trước khi chạy CNN..."
                         )
                         self.uturn_step_phase = 'ALIGN_ROW2_CENTER'
                         self.uturn_phase_start_yaw = current_imu_yaw
@@ -2394,29 +2578,36 @@ class CnnDriverNode(Node):
                         self._row2_aligned_frames = 0
                         return
                     else:
-                        # Xoay tại chỗ 4 bánh ngược chiều cực khỏe vào tâm Luống 2, giảm tốc nhẹ ở 15° cuối chống văng lố
-                        rem_deg = max(0.0, 90.0 - phase_turned_deg)
-                        turn_rate = float(self.turn_angular_speed) if rem_deg > 15.0 else max(0.32, float(self.turn_angular_speed) * 0.78)
-                        twist.linear.x = 0.0
-                        twist.angular.z = float(turn_sign * turn_rate)
+                        if self._imu_is_fresh() and self._fast_turn_active:
+                            self._suppress_cmd_publish = True
+                        else:
+                            turn_rate = self._turn_rate_for_remaining(max(0.0, rem_deg), gyro_dps, phase_elapsed)
+                            twist.linear.x = 0.0
+                            twist.angular.z = float(turn_sign * turn_rate)
 
-                # ── PHA 4: CANH CHỈNH GIỮA LUỐNG 2 (CNN + LIDAR CENTERING) TRƯỚC KHI CHẠY BÁM LUỐNG ──
+                # ── PHA 4: CANH CHỈNH GIỮA LUỐNG 2 (CNN + LIDAR + IMU) TRƯỚC KHI CHẠY BÁM LUỐNG ──
                 elif phase == 'ALIGN_ROW2_CENTER':
                     docking_info = self.lidar_processor.get_row_entrance_centering(
                         min_fwd=0.20, max_fwd=1.80, expected_row_spacing=self.row_spacing
                     )
-                    # Sai số góc hướng & độ lệch tâm từ CNN + LiDAR 2 bên sườn:
-                    cnn_err_deg = float(raw_angle) if confidence >= 0.28 else 0.0
-                    lidar_lat_err_deg = 0.0
-                    if left_side_dist < 1.05 and right_side_dist < 1.05:
-                        lidar_lat_err_deg = (right_side_dist - left_side_dist) * 14.0
-                    elif docking_info["detected"]:
-                        lidar_lat_err_deg = -float(docking_info["lateral_offset"]) * 14.0
+                    # 1. Sai số góc IMU so với hướng chuẩn ngược chiều Luống 1 (+180°):
+                    # Quy ước dấu đồng nhất với raw_angle: dương (+) = cần rẽ Phải (CW, w < 0), âm (-) = cần rẽ Trái (CCW, w > 0)
+                    imu_yaw_err_rad = self._wrap_angle(self.uturn_target_yaw - current_imu_yaw)
+                    imu_err_deg = -math.degrees(imu_yaw_err_rad)
 
-                    combined_err_deg = cnn_err_deg + lidar_lat_err_deg
+                    # 2. Sai số từ CNN (raw_angle đã bao gồm LiDAR corridor centering từ perception_manager) & LiDAR Docking cửa luống:
+                    docking_err_deg = -float(docking_info["lateral_offset"]) * 15.0 if docking_info["detected"] else 0.0
+                    if confidence >= 0.32:
+                        combined_err_deg = 0.80 * float(raw_angle) + 0.20 * imu_err_deg
+                    elif docking_info["detected"]:
+                        combined_err_deg = 0.60 * imu_err_deg + 0.40 * docking_err_deg
+                    else:
+                        combined_err_deg = imu_err_deg + (0.50 * float(raw_angle) if abs(raw_angle) > 0.5 else 0.0)
+
+                    has_side_corridor = (left_side_dist < 0.95 and right_side_dist < 0.95)
                     is_centered_now = (
-                        (confidence >= 0.35 and abs(raw_angle) <= 5.5 and abs(lane_offset) <= 0.15) or
-                        (abs(combined_err_deg) <= 4.5 and (confidence >= 0.30 or docking_info["detected"]))
+                        (confidence >= 0.35 and abs(raw_angle) <= 5.0 and abs(lane_offset) <= 0.15 and abs(imu_err_deg) <= 12.0) or
+                        (abs(combined_err_deg) <= 4.0 and abs(imu_err_deg) <= 6.0 and (confidence >= 0.30 or docking_info["detected"] or has_side_corridor))
                     )
 
                     if is_centered_now:
@@ -2424,39 +2615,33 @@ class CnnDriverNode(Node):
                     else:
                         self._row2_aligned_frames = 0
 
-                    # Hoàn tất canh chỉnh khi đã khóa giữa luống >= 3 frame liên tiếp (hoặc sau 2.8s tối đa)
-                    if self._row2_aligned_frames >= 3 or phase_elapsed >= 2.8:
+                    # Hoàn tất canh chỉnh khi đã khóa thẳng giữa luống >= 3 frame liên tiếp (hoặc sau 3.5s tối đa)
+                    if self._row2_aligned_frames >= 3 or phase_elapsed >= 3.5:
                         self.get_logger().info(
-                            f"🎯 [NHỊP 4 HOÀN TẤT - ĐÃ CANH GIỮA LUỐNG 2] "
-                            f"CNN Conf={confidence*100:.1f}%, Steer={raw_angle:+.1f}°, Offset={lane_offset:+.2f}, "
+                            f"🎯 [NHỊP 4 HOÀN TẤT - ĐÃ CANH THẲNG HÀNG LUỐNG 2] "
+                            f"CNN Conf={confidence*100:.1f}%, Steer={raw_angle:+.1f}°, IMU_Err={imu_err_deg:+.1f}°, Offset={lane_offset:+.2f}, "
                             f"Sườn L/R={left_side_dist:.2f}/{right_side_dist:.2f}m | Bắt đầu chạy thẳng bám CNN Luống 2!"
                         )
                         if self.enable_file_logging and self.telemetry_logger:
                             self.telemetry_logger.log_event(
                                 "UTURN_2STEP_SUCCESS",
-                                f"Hoàn tất quay & canh giữa Luống 2: CNN_Conf={confidence:.2f}, Steer={raw_angle:.1f}°, Offset={lane_offset:.2f}"
+                                f"Hoàn tất quay & canh giữa Luống 2: CNN_Conf={confidence:.2f}, Steer={raw_angle:.1f}°, IMU_Err={imu_err_deg:.1f}°, Offset={lane_offset:.2f}"
                             )
                         self.smoothed_angle_deg = float(raw_angle) if confidence >= 0.30 else 0.0
                         self.transition_after_path(now)
                         return
                     else:
-                        # Nếu góc lệch đầu luống còn lớn (> 6.0° trong 1.5s đầu): xoay nhẹ tại chỗ chỉnh thẳng mũi xe vào tim luống
-                        if abs(combined_err_deg) > 6.0 and phase_elapsed < 1.5:
-                            w_align = float(np.clip(-0.055 * combined_err_deg, -0.38, 0.38))
+                        # Bước 4A: Nếu góc mũi xe còn lệch > 5.5° (trong 2.2s đầu): xoay nhẹ tại chỗ chỉnh thẳng mũi xe song song Luống 2 trước
+                        if abs(combined_err_deg) > 5.5 and phase_elapsed < 2.2:
+                            w_align = float(np.clip(-0.055 * combined_err_deg, -0.36, 0.36))
                             if abs(w_align) < 0.28:
                                 w_align = math.copysign(0.28, w_align)
                             twist.linear.x = 0.0
                             twist.angular.z = w_align
                         else:
-                            # Vừa tiến nhẹ 0.07 m/s vừa bẻ lái kéo thân xe vào chính giữa 2 hàng
+                            # Bước 4B: Mũi xe đã thẳng (<= 5.5°) -> tiến nhẹ 0.07 m/s vừa đi vào luống vừa căn giữa 2 hàng
                             twist.linear.x = float(self.linear_speed)
                             twist.angular.z = float(np.clip(-0.065 * combined_err_deg, -0.28, 0.28))
-
-                # Bù lực xoay 4 bánh nếu mặt đất cỏ gồ ghề cản trở tốc độ quay thực tế của IMU
-                actual_gyro_z = getattr(self.localization_manager, 'imu_angular_vel_z', 0.0)
-                if phase in ['TURN_90_TO_BLACK', 'TURN_90_INTO_ROW2'] and abs(twist.angular.z) > 0.15 and abs(actual_gyro_z) < 0.55 * abs(twist.angular.z):
-                    twist.linear.x = 0.0
-                    twist.angular.z = float(math.copysign(min(0.56, abs(twist.angular.z) * 1.25), twist.angular.z))
             else:
                 lin_vel, ang_vel, finished, path_idx = self.FollowPath()
                 lane_center = self.current_lane_y
@@ -2492,8 +2677,9 @@ class CnnDriverNode(Node):
             self.StopRobot()
 
         # Khi đang trong chu kỳ căn chỉnh góc mềm hoặc đang nắn chỉnh miệng luống, cmd_vel do callback/timer chuyên trách kiểm soát
-        if not self.is_adjusting_heading and not self.is_trimming_uturn_heading:
+        if not self.is_adjusting_heading and not self.is_trimming_uturn_heading and not self._suppress_cmd_publish:
             self.cmd_vel_pub.publish(twist)
+        self._suppress_cmd_publish = False
 
         # ── Telemetry File Logging & Standardized Terminal Status Output ──
         pose_info = self.localization_manager.get_pose()
@@ -2765,8 +2951,11 @@ class CnnDriverNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = CnnDriverNode()
+    # 2 luồng: luồng 1 cho camera/odom/scan (giữ nguyên tuần tự như cũ), luồng 2 riêng cho IMU (Fast Turn Guard)
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, rclpy.executors.ExternalShutdownException):
         pass
     finally:

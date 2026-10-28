@@ -665,7 +665,8 @@ void stopMotor(bool emergency) {
   currentDirection = "STOP";
 
   for (int i = 0; i < 4; i++) {
-    slew[i].target = 0;
+    slew[i].target = 0.0f;
+    slew[i].current = 0.0f;
     wpid[i].targetRPM = 0.0f;
     wpid[i].integral = 0;
     wpid[i].lastError = 0;
@@ -675,10 +676,10 @@ void stopMotor(bool emergency) {
     rosTargetRpmSigned[i] = 0.0f;
   }
 
+  writeAllDrives(0, 0, 0, 0);
+  isMoving = false;
+
   if (emergency) {
-    for (int i = 0; i < 4; i++) slew[i].current = 0.0f;
-    writeAllDrives(0, 0, 0, 0);
-    isMoving = false;
     Serial.println("# [ESTOP] DUNG KHAN CAP - NGAT DIEN TUC THI!");
   }
 }

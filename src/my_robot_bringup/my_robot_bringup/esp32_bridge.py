@@ -174,6 +174,19 @@ class ESP32Bridge(Node):
         if self._cmd_timeout_active:
             self._cmd_timeout_active = False
             self.get_logger().info('✅ [CMD_VEL WATCHDOG] Đã nhận lại lệnh /cmd_vel -> tiếp tục điều khiển.')
+        # Khi nhận lệnh DỪNG (v=0, w=0) — đặc biệt lúc đủ 90° hoặc chạm mốc 0.50m:
+        # Ngắt xung xuống ESP32 tức thì trong callback (không chờ chu kỳ timer 50ms & không trượt slew-rate 0.9s)
+        if abs(msg.linear.x) < 0.005 and abs(msg.angular.z) < 0.005:
+            if abs(self.current_rpm_left) > 0.05 or abs(self.current_rpm_right) > 0.05:
+                self.target_rpm_left = 0.0
+                self.target_rpm_right = 0.0
+                self.current_rpm_left = 0.0
+                self.current_rpm_right = 0.0
+                if self.mode == 'serial' and self.ser and self.ser.is_open:
+                    try:
+                        self.ser.write(b'V 0.0 0.0\n')
+                    except Exception:
+                        pass
         # Chỉ cập nhật vx/vth trực tiếp từ cmd_vel khi chạy chế độ MOCK (không có phần cứng)
         if self.mode != 'serial':
             self.vx = msg.linear.x
@@ -262,10 +275,11 @@ class ESP32Bridge(Node):
             self.target_rpm_right = rpm_r
 
         # Slew-Rate Limiter (Bộ làm mềm gia tốc/hãm phanh chống trượt bánh và văng xe trên cỏ/đất)
-        # Khi xoay tại chỗ (is_pivot): cấp đối xứng tức thì cho 2 vế Trái/Phải ngược dấu nhau để ESP32 kích hoạt ngay chế độ Pivot Torque,
-        # tránh hiện tượng 1 vế đi qua điểm 0 bị khựng/khóa bánh!
+        # Khi xoay tại chỗ (is_pivot) HOẶC khi có lệnh dừng hẳn (is_stop):
+        # Cấp/ngắt đối xứng tức thì cho 2 vế Trái/Phải, tránh trễ slew-rate 0.9s làm xe quay lố quá 90°!
         is_pivot = (abs(self._cmd_v) < 0.025 and abs(self._cmd_w) > 0.05)
-        if is_pivot:
+        is_stop = (abs(self.target_rpm_left) < 0.01 and abs(self.target_rpm_right) < 0.01)
+        if is_pivot or is_stop:
             self.current_rpm_left = self.target_rpm_left
             self.current_rpm_right = self.target_rpm_right
         else:
